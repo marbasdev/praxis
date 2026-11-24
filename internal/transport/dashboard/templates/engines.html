@@ -419,21 +419,44 @@
   </div>
   {{end}}
 
-  <!-- ==================== PANE: CUSTOM LOCAL ==================== -->
+  <!-- ==================== PANE: CUSTOM LOCAL / OPENAI GATEWAY ==================== -->
   {{if eq .ViewedProvider "local"}}
-  <div id="pane-local" class="sub-panel">
-    <div style="display:flex;justify-content:space-between;align-items:center;">
+  <div id="pane-local" class="sub-panel"
+    x-data='{
+      draftURL: {{jsonAttr .LocalURLVal}},
+      pickPreset(u) {
+        if (this.draftURL.trim().replace(/\/+$/, "") !== u) {
+          this.draftURL = u;
+          this.$dispatch("local-preset-changed");
+        }
+      },
+      isPreset(u) { return this.draftURL.trim().replace(/\/+$/, "") === u; }
+    }'>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.4rem;">
       <h3>{{t .Lang "local_ep_title"}}</h3>
-      <span class="badge {{if index .Config "local_key_status"}}b-ok{{else}}b-muted{{end}}">
-        {{if index .Config "local_key_status"}}{{index .Config "local_key_status"}}{{else}}No Auth{{end}}
-      </span>
+      <div style="display:flex;gap:0.35rem;flex-wrap:wrap;">
+        <span id="localLiveBadge" {{if gt .LocalDiscoveredCount 0}}class="badge b-ok"{{else}}hidden{{end}} @local-preset-changed.window="$el.hidden = true">{{if gt .LocalDiscoveredCount 0}}Live API ({{.LocalDiscoveredCount}}){{end}}</span>
+        <span class="badge {{if index .Config "local_key_status"}}b-ok{{else}}b-muted{{end}}">
+          {{if index .Config "local_key_status"}}{{index .Config "local_key_status"}}{{else}}No Auth{{end}}
+        </span>
+      </div>
     </div>
-    <form id="activeEngineForm" style="display:flex;gap:0.45rem;flex-wrap:wrap;"
+    <div style="font-size:0.76rem;color:var(--muted);">{{t .Lang "local_ep_desc"}}</div>
+    <div class="pills" id="localPresetPills">
+      <button type="button" class="pill" :class="{ 'active': isPreset('http://127.0.0.1:11434/v1') }" @click="pickPreset('http://127.0.0.1:11434/v1')">Ollama (:11434)</button>
+      <button type="button" class="pill" :class="{ 'active': isPreset('http://127.0.0.1:1234/v1') }" @click="pickPreset('http://127.0.0.1:1234/v1')">LM Studio (:1234)</button>
+      <button type="button" class="pill" :class="{ 'active': isPreset('http://127.0.0.1:4000/v1') }" @click="pickPreset('http://127.0.0.1:4000/v1')">LiteLLM (:4000)</button>
+      <button type="button" class="pill" :class="{ 'active': isPreset('https://openrouter.ai/api/v1') }" @click="pickPreset('https://openrouter.ai/api/v1')">OpenRouter</button>
+    </div>
+    <form id="activeEngineForm" style="display:flex;gap:0.45rem;flex-wrap:wrap;align-items:center;"
       hx-post="/ui/engines/save" hx-target="#enginesSection" hx-swap="innerHTML">
       <input type="hidden" name="provider" value="local">
-      <input name="local_model_url" class="input" style="flex:1;min-width:240px;font-family:var(--mono);font-size:0.79rem;" value="{{index .Config "local_model_url"}}" aria-label="OpenAI-Compatible Base URL">
-      <input name="local_model_name" class="input" style="width:180px;font-family:var(--mono);font-size:0.79rem;" value="{{index .Config "local_model_name"}}" placeholder="Model (e.g. qwen3:4b)" aria-label="Model Name">
-      <input name="local_api_key" type="password" class="input" style="width:210px;" placeholder="{{t .Lang "ph_local_key"}}" aria-label="Optional API Key">
+      <input name="local_model_url" class="input" style="flex:1.2;min-width:230px;font-family:var(--mono);font-size:0.79rem;" x-model="draftURL" aria-label="OpenAI-Compatible Base URL">
+      {{template "engine_local_model_field" .}}
+      <input name="local_api_key" type="password" class="input" style="width:205px;" placeholder="{{t .Lang "ph_local_key"}}" aria-label="Optional API Key">
+      <button type="button" class="btn"
+        hx-post="/ui/engines/discover-local" hx-include="#activeEngineForm"
+        hx-target="#localModelField" hx-swap="outerHTML">{{t .Lang "btn_fetch_models"}}</button>
       <button type="submit" class="btn btn-primary">{{t .Lang "btn_save_engine"}}</button>
     </form>
   </div>
@@ -580,4 +603,31 @@
       style="font-family:var(--mono);font-size:0.69rem;min-width:120px;text-align:center;" title="{{t .Lang "route_lbl_effective"}}">{{.EffectiveEngine}}</span>
   </div>
 </div>
+{{end}}
+
+{{define "engine_local_model_field"}}
+<div id="localModelField" class="combo-box" style="flex:1;min-width:205px;"
+  x-data='{ open: {{if .LocalAutoOpen}}true{{else}}false{{end}}, draftModel: {{jsonAttr .LocalModelVal}}, localOpts: {{jsonAttr .LocalModelOptions}} }'
+  @local-preset-changed.window="draftModel = ''; localOpts = []; open = false"
+  @click.outside="open = false">
+  <input name="local_model_name" class="input" autocomplete="off" style="font-family:var(--mono);font-size:0.78rem;"
+    x-model="draftModel" @focus="open = true" @click="open = true"
+    @keydown.escape="open = false" @keydown.tab="open = false"
+    placeholder="{{t .Lang "ph_local_model"}}" aria-label="Model Name">
+  <button type="button" class="combo-btn" @click.stop="open = !open" tabindex="-1">▾</button>
+  <div class="combo-menu" :class="{ 'open': open && (draftModel.trim().length > 0 || filterModelOptions(localOpts, draftModel).length > 0) }">
+    <div class="combo-item" x-show="draftModel.trim().length > 0" @click="draftModel = ''; open = false;" style="color:var(--muted);font-style:italic;">— Clear</div>
+    <template x-for="item in filterModelOptions(localOpts, draftModel)" :key="item">
+      <div class="combo-item" :class="{ 'active': item === draftModel }" @click="draftModel = item; open = false;"><span x-text="item" style="font-family:var(--mono);font-size:0.75rem;"></span></div>
+    </template>
+    <div x-show="matchingModelList(localOpts, draftModel).length > 80" style="padding:0.32rem 0.55rem;font-size:0.71rem;color:var(--muted);border-top:1px solid var(--border);">
+      {{if eq .Lang "ko"}}상위 80개 표시 중 — 검색어를 입력해 좁히세요{{else}}Showing first 80 — type to filter more{{end}}
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{define "engine_local_discover_oob"}}
+{{template "engine_local_model_field" .}}
+<span id="localLiveBadge" hx-swap-oob="outerHTML" {{if gt .LocalDiscoveredCount 0}}class="badge b-ok"{{else}}hidden{{end}} @local-preset-changed.window="$el.hidden = true">{{if gt .LocalDiscoveredCount 0}}Live API ({{.LocalDiscoveredCount}}){{end}}</span>
 {{end}}

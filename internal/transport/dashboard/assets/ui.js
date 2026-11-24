@@ -460,11 +460,18 @@
     }
   });
 
-  window.providerModelsFor = (modelMap, prov, val) => {
-    const list = (modelMap && prov && Array.isArray(modelMap[prov])) ? modelMap[prov] : [];
+  window.matchingModelList = (items, val) => {
+    const list = Array.isArray(items) ? items : [];
     const q = String(val || '').trim().toLowerCase();
     if (!q || list.some(x => String(x).toLowerCase() === q)) return list;
     return list.filter(x => String(x).toLowerCase().includes(q));
+  };
+
+  window.filterModelOptions = (items, val) => window.matchingModelList(items, val).slice(0, 80);
+
+  window.providerModelsFor = (modelMap, prov, val) => {
+    const list = (modelMap && prov && Array.isArray(modelMap[prov])) ? modelMap[prov] : [];
+    return window.filterModelOptions(list, val);
   };
 
   window.catPresetsModal = initialMap => ({

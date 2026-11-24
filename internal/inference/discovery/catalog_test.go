@@ -229,5 +229,46 @@ func TestDiscoveryConfigRoutingLocalProbeAndSystemOneSSRF(t *testing.T) {
 		if len(detected) != 2 {
 			t.Fatalf("expected 2 detected local servers, got %+v", detected)
 		}
+
+		authMu.Lock()
+		savedHostAuth = ""
+		foreignHostAuth = ""
+		authMu.Unlock()
+		models, apiErr := discovery.DiscoverOpenAIEndpoint(context.Background(), map[string]string{
+			"local_model_url": savedSrv.URL + "/v1",
+			"local_api_key":   "sk-saved-gateway",
+		}, savedSrv.URL+"/v1", "")
+		authMu.Lock()
+		gotOpenAISavedAuth := savedHostAuth
+		authMu.Unlock()
+		if apiErr != "" || len(models) != 1 || models[0] != "OmniJev/OneJev1.6-0.8B" || gotOpenAISavedAuth != "Bearer sk-saved-gateway" {
+			t.Fatalf("expected DiscoverOpenAIEndpoint to use saved key on matching host: models=%v err=%q auth=%q", models, apiErr, gotOpenAISavedAuth)
+		}
+
+		_, _ = discovery.DiscoverOpenAIEndpoint(context.Background(), map[string]string{
+			"local_model_url": "https://openrouter.ai/api/v1",
+			"local_api_key":   "sk-or-secret",
+		}, foreignSrv.URL+"/v1", "")
+		authMu.Lock()
+		gotOpenAIForeignAuth := foreignHostAuth
+		authMu.Unlock()
+		if gotOpenAIForeignAuth != "" {
+			t.Fatalf("SSRF guard leaked local_api_key to foreign host: %q", gotOpenAIForeignAuth)
+		}
+
+		// Different loopback port must ALSO block stored key transmission (origin check, not bare hostname).
+		authMu.Lock()
+		foreignHostAuth = ""
+		authMu.Unlock()
+		_, _ = discovery.DiscoverOpenAIEndpoint(context.Background(), map[string]string{
+			"local_model_url": savedSrv.URL + "/v1",
+			"local_api_key":   "sk-port-bound",
+		}, foreignSrv.URL+"/v1", "")
+		authMu.Lock()
+		gotCrossPortAuth := foreignHostAuth
+		authMu.Unlock()
+		if gotCrossPortAuth != "" {
+			t.Fatalf("origin guard leaked local_api_key across different port: %q", gotCrossPortAuth)
+		}
 	})
 }

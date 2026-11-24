@@ -433,6 +433,22 @@ func registerSSRRoutes(mux *http.ServeMux, d Deps) {
 		renderEnginesSection(w, r, d, lang, q, r.FormValue("typesafe_api_key"), r.FormValue("jev_api_url"))
 	})))
 
+	mux.HandleFunc("/ui/engines/discover-local", postHX(requireAdminRoute(func(w http.ResponseWriter, r *http.Request) {
+		lang := requestLang(r)
+		q := url.Values{"view": {"local"}, "discover_local": {"1"}}
+		if m := strings.TrimSpace(r.FormValue("local_model_name")); m != "" {
+			q.Set("local_model", m)
+		}
+		view := buildEnginesView(r.Context(), d, lang, q, r.FormValue("local_api_key"), r.FormValue("local_model_url"))
+		view.OOB = true
+		if view.LocalAPIError != "" {
+			setHXTriggers(w, view.LocalAPIError, false, false)
+		} else {
+			setHXTriggers(w, langText(lang, fmt.Sprintf("Loaded %d model(s)", view.LocalDiscoveredCount), fmt.Sprintf("모델 %d개 조회 완료", view.LocalDiscoveredCount)), false, false)
+		}
+		writeHTMLTemplate(w, "engine_local_discover_oob", view)
+	})))
+
 	mux.HandleFunc("/ui/engines/save", postHX(requireAdminRoute(func(w http.ResponseWriter, r *http.Request) {
 		lang := requestLang(r)
 		prov := strings.ToLower(strings.TrimSpace(r.FormValue("provider")))

@@ -150,6 +150,51 @@ func TestOpenAICompatibleAdapterAndMinimalJSONObjectFallback(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("expected 2 calls (json_schema -> json_object fallback), got %d", calls.Load())
 	}
+
+	t.Run("large_gateway_catalog_context_length_and_url_resolution", func(t *testing.T) {
+		if got := ResolveOpenAIModelsURL("https://openrouter.ai/api/v1/"); got != "https://openrouter.ai/api/v1/models" {
+			t.Fatalf("unexpected OpenRouter models URL: %q", got)
+		}
+		if got := ResolveOpenAIModelsURL("https://generativelanguage.googleapis.com/v1beta/openai"); got != "https://generativelanguage.googleapis.com/v1beta/openai/models" {
+			t.Fatalf("unexpected /openai models URL: %q", got)
+		}
+		if got := resolveChatCompletionsURL("https://generativelanguage.googleapis.com/v1beta/openai"); got != "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" {
+			t.Fatalf("unexpected /openai chat/completions URL: %q", got)
+		}
+
+		padding := strings.Repeat("x", 512)
+		items := make([]map[string]any, 0, 260)
+		for range 250 {
+			items = append(items, map[string]any{"id": "vendor/filler-model", "description": padding, "context_length": 8192})
+		}
+		items = append(items,
+			map[string]any{"id": "anthropic/claude-sonnet-gateway", "context_length": 200000},
+			map[string]any{"id": "litellm/proxy-model", "model_info": map[string]any{"max_input_tokens": 64000}},
+		)
+		catalogPayload, _ := json.Marshal(map[string]any{"data": items})
+		if len(catalogPayload) <= 100*1024 {
+			t.Fatalf("expected >100KB catalog payload to exercise >64KB reader, got %d bytes", len(catalogPayload))
+		}
+
+		gwSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/models" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(catalogPayload)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer gwSrv.Close()
+
+		gwOR := NewOpenAICompatibleAdapter(gwSrv.URL+"/api/v1", "anthropic/claude-sonnet-gateway", "sk-or-test")
+		if lim := gwOR.InputTokenLimit(context.Background()); lim != 200000 {
+			t.Fatalf("expected context_length=200000 from large OpenRouter-style /models payload, got %d", lim)
+		}
+		gwLite := NewOpenAICompatibleAdapter(gwSrv.URL+"/api/v1", "litellm/proxy-model", "sk-lite-test")
+		if lim := gwLite.InputTokenLimit(context.Background()); lim != 64000 {
+			t.Fatalf("expected model_info.max_input_tokens=64000 from LiteLLM-style /models payload, got %d", lim)
+		}
+	})
 }
 
 func TestFlideAndJevSystemOneAdapterPrefixAndModels(t *testing.T) {

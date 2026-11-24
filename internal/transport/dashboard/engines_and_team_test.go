@@ -415,6 +415,14 @@ func TestLocalInferenceProbeAndSetupLanding(t *testing.T) {
 	if strings.Contains(string(body2), `data-setup-required="1"`) || !strings.Contains(string(body2), `data-setup-required=""`) {
 		t.Fatalf("expected data-setup-required=\"\" after configuring Gemini key")
 	}
+
+	discCode, discHTML := doHX(t, http.MethodPost, ts.URL+"/ui/engines/discover-local", url.Values{
+		"local_model_url":  {ollamaSrv.URL + "/v1"},
+		"local_model_name": {"qwen3:4b"},
+	})
+	if discCode != http.StatusOK || !strings.Contains(discHTML, "Live API (2)") || !strings.Contains(discHTML, "gemma3:12b") {
+		t.Fatalf("expected /ui/engines/discover-local to render Live API (2) and gemma3:12b (code=%d):\n%s", discCode, discHTML)
+	}
 }
 
 type teamUITestEval struct {

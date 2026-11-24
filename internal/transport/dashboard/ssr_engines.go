@@ -45,6 +45,12 @@ type ssrEnginesData struct {
 	JevKeyClass          string
 	JevKeyLabel          string
 	JevModels            []discovery.SystemOneModelOption
+	LocalURLVal          string
+	LocalModelVal        string
+	LocalDiscoveredCount int
+	LocalAutoOpen        bool
+	LocalAPIError        string
+	LocalModelOptions    []string
 	DetectedLocalServers []discovery.DetectedLocalServer
 	BulkDecisionOnly     bool
 	BulkSummary          string
@@ -203,7 +209,7 @@ func buildJevCatalog(ctx context.Context, lang string, rawCfg, cfg map[string]st
 		jevURL = "https://api.typesafe.ai/v1/sys" + "temone"
 		jevModel = "jev-1.13.0"
 	}
-	if overrideURL != "" {
+	if viewedProv == "jev" && overrideURL != "" {
 		jevURL = overrideURL
 	}
 	jevCloud := providers.IsTypesafeCloudURL(jevURL)
@@ -367,8 +373,30 @@ func buildEnginesView(ctx context.Context, d Deps, lang string, q url.Values, ov
 		detectedLocal = discovery.ProbeLocalInferenceServers(ctx)
 	}
 
-	genModelsByProv := buildProviderModelMap(gemModels, jev.models, lm, detectedLocal, cfg, true)
-	allModelsByProv := buildProviderModelMap(gemModels, jev.models, lm, detectedLocal, cfg, false)
+	localURLVal := cfg["local_model_url"]
+	localModelVal := cfg["local_model_name"]
+	if viewedProv == "local" {
+		if overrideURL != "" {
+			localURLVal = overrideURL
+		}
+		if lmOverride := strings.TrimSpace(q.Get("local_model")); lmOverride != "" {
+			localModelVal = lmOverride
+		}
+	}
+	var discoveredOpenAI []string
+	var localAPIErr string
+	didDiscoverLocal := viewedProv == "local" && (q.Get("discover_local") == "1" || overrideURL != "" || overrideKey != "")
+	if didDiscoverLocal {
+		discoveredOpenAI, localAPIErr = discovery.DiscoverOpenAIEndpoint(ctx, rawCfg, localURLVal, overrideKey)
+	}
+	localPaneOpts := mergeMatchingLocalModels(localURLVal, discoveredOpenAI, localModelVal, detectedLocal)
+	routeLocalOpts := mergeMatchingLocalModels(cfg["local_model_url"], nil, cfg["local_model_name"], detectedLocal)
+	if discovery.SameURLOrigin(localURLVal, cfg["local_model_url"]) {
+		routeLocalOpts = mergeMatchingLocalModels(cfg["local_model_url"], discoveredOpenAI, cfg["local_model_name"], detectedLocal)
+	}
+
+	genModelsByProv := buildProviderModelMap(gemModels, jev.models, lm, routeLocalOpts, cfg, true)
+	allModelsByProv := buildProviderModelMap(gemModels, jev.models, lm, routeLocalOpts, cfg, false)
 	for i := range taskRows {
 		if taskRows[i].RequiresGenerative {
 			taskRows[i].ModelsByProv = genModelsByProv
@@ -395,43 +423,75 @@ func buildEnginesView(ctx context.Context, d Deps, lang string, q url.Values, ov
 			{ID: "accuracy", Label: uiText(lang, "tier_accuracy")},
 			{ID: "all", Label: uiText(lang, "tier_all")},
 		},
-		HFSort:             gguf.hfSort,
-		HFQuery:            gguf.hfQuery,
-		HFLive:             gguf.hfLive,
-		HFSource:           gguf.hfSource,
-		GGUFCatalog:        gguf.catalog,
-		GeminiTier:         gemTier,
-		GeminiTierTabs:     []ssrTabOption{{ID: "speed", Label: "Flash-Lite"}, {ID: "decision", Label: uiText(lang, "tier_decision")}, {ID: "balanced", Label: "Flash"}, {ID: "accuracy", Label: "Pro"}, {ID: "all", Label: uiText(lang, "tier_all")}},
-		GeminiSource:       gemSource,
-		GeminiAllCount:     gemAllCount,
-		GeminiModels:       filteredGem,
-		JevCloud:           jev.cloud,
-		JevURLVal:          jev.urlVal,
-		JevModelVal:        jev.modelVal,
-		JevSourceClass:     jev.sourceClass,
-		JevSourceLabel:     jev.sourceLabel,
-		JevKeyClass:        jev.keyClass,
-		JevKeyLabel:        jev.keyLabel,
-		JevModels:          jev.models,
-		BulkDecisionOnly:   bulkDecOnly,
-		BulkSummary:        bulkSummary,
-		CustomRouteCount:   customCount,
-		GenProviderVal:     cfg["gen_provider"],
-		GenModelVal:        cfg["gen_model"],
-		GenEffective:       genEff,
-		GenModelsByProv:    genModelsByProv,
-		GenProviderOptions: genOnlyOpts,
-		TaskRoutes:         taskRows,
-		Telemetry:          evalTelemetry,
-		TelemetryViz:       buildTelemetryViz(lang, winID, evalTelemetry),
+		HFSort:               gguf.hfSort,
+		HFQuery:              gguf.hfQuery,
+		HFLive:               gguf.hfLive,
+		HFSource:             gguf.hfSource,
+		GGUFCatalog:          gguf.catalog,
+		GeminiTier:           gemTier,
+		GeminiTierTabs:       []ssrTabOption{{ID: "speed", Label: "Flash-Lite"}, {ID: "decision", Label: uiText(lang, "tier_decision")}, {ID: "balanced", Label: "Flash"}, {ID: "accuracy", Label: "Pro"}, {ID: "all", Label: uiText(lang, "tier_all")}},
+		GeminiSource:         gemSource,
+		GeminiAllCount:       gemAllCount,
+		GeminiModels:         filteredGem,
+		JevCloud:             jev.cloud,
+		JevURLVal:            jev.urlVal,
+		JevModelVal:          jev.modelVal,
+		JevSourceClass:       jev.sourceClass,
+		JevSourceLabel:       jev.sourceLabel,
+		JevKeyClass:          jev.keyClass,
+		JevKeyLabel:          jev.keyLabel,
+		JevModels:            jev.models,
+		LocalURLVal:          localURLVal,
+		LocalModelVal:        localModelVal,
+		LocalDiscoveredCount: len(discoveredOpenAI),
+		LocalAutoOpen:        didDiscoverLocal && len(discoveredOpenAI) > 0,
+		LocalAPIError:        localAPIErr,
+		LocalModelOptions:    localPaneOpts,
+		BulkDecisionOnly:     bulkDecOnly,
+		BulkSummary:          bulkSummary,
+		CustomRouteCount:     customCount,
+		GenProviderVal:       cfg["gen_provider"],
+		GenModelVal:          cfg["gen_model"],
+		GenEffective:         genEff,
+		GenModelsByProv:      genModelsByProv,
+		GenProviderOptions:   genOnlyOpts,
+		TaskRoutes:           taskRows,
+		Telemetry:            evalTelemetry,
+		TelemetryViz:         buildTelemetryViz(lang, winID, evalTelemetry),
 	}
+}
+
+func mergeMatchingLocalModels(targetURL string, discovered []string, configured string, detected []discovery.DetectedLocalServer) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, m := range discovered {
+		add(m)
+	}
+	if len(discovered) == 0 {
+		add(configured)
+	}
+	for _, srv := range detected {
+		if srv.Provider == "local" && discovery.SameURLOrigin(srv.BaseURL, targetURL) {
+			for _, m := range srv.Models {
+				add(m)
+			}
+		}
+	}
+	return out
 }
 
 func buildProviderModelMap(
 	gemModels []discovery.GeminiModelOption,
 	jevModels []discovery.SystemOneModelOption,
 	lm localmodel.StatusSnapshot,
-	detectedLocal []discovery.DetectedLocalServer,
+	localModels []string,
 	cfg map[string]string,
 	generativeOnly bool,
 ) map[string][]string {
@@ -469,12 +529,8 @@ func buildProviderModelMap(
 	}
 	add("gguf", cfg[config.CfgGGUFModel])
 	add("local", cfg["local_model_name"])
-	for _, srv := range detectedLocal {
-		if srv.Provider == "local" {
-			for _, m := range srv.Models {
-				add("local", m)
-			}
-		}
+	for _, m := range localModels {
+		add("local", m)
 	}
 	if gp := strings.TrimSpace(cfg["gen_provider"]); gp != "" {
 		add(gp, cfg["gen_model"])
@@ -517,16 +573,16 @@ func buildEngineSetupWarning(lang string, rawCfg, cfg map[string]string, provNam
 	switch eff {
 	case "none":
 		return setupMsg(lang,
-			"활성화된 추론 엔진이 없습니다. 추론 엔진 탭에서 로컬 GGUF 다운로드 또는 Gemini · 로컬 URL · System 1을 설정하세요.",
-			"No inference engine is configured. Open the Engines tab to download Local GGUF or configure Gemini, Custom Local URL, or System 1.")
+			"활성화된 추론 엔진이 없습니다. 추론 엔진 탭에서 로컬 GGUF 다운로드 또는 Gemini · 커스텀 URL(OpenAI 호환) · System 1을 설정하세요.",
+			"No inference engine is configured. Open the Engines tab to download Local GGUF or configure Gemini, Custom URL (OpenAI-Compatible), or System 1.")
 	case "gguf":
 		if !lm.Supported {
 			return checkDashboardLocalSetup(lang, rawCfg)
 		}
 		if len(lm.Installed) == 0 && !lm.ServerRunning && !lm.Download.Active {
 			return setupMsg(lang,
-				"설치된 로컬 GGUF 모델이 없습니다. 추론 엔진 탭에서 권장 모델을 1클릭 다운로드하거나 Gemini · 로컬 URL · System 1을 설정하세요.",
-				"No local GGUF model is installed yet. Open the Engines tab to download a model in 1 click or configure Gemini, Custom Local URL, or System 1.")
+				"설치된 로컬 GGUF 모델이 없습니다. 추론 엔진 탭에서 권장 모델을 1클릭 다운로드하거나 Gemini · 커스텀 URL(OpenAI 호환) · System 1을 설정하세요.",
+				"No local GGUF model is installed yet. Open the Engines tab to download a model in 1 click or configure Gemini, Custom URL (OpenAI-Compatible), or System 1.")
 		}
 		if len(lm.Installed) > 0 && !lm.RuntimeInstalled && !lm.ServerRunning && !lm.Download.Active {
 			return setupMsg(lang,

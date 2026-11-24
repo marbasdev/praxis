@@ -27,6 +27,27 @@ func sameURLHost(rawA, rawB string) bool {
 	return strings.EqualFold(uA.Hostname(), uB.Hostname())
 }
 
+func effectivePort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
+
+func SameURLOrigin(rawA, rawB string) bool {
+	uA, errA := url.Parse(strings.TrimSpace(rawA))
+	uB, errB := url.Parse(strings.TrimSpace(rawB))
+	if errA != nil || errB != nil || uA.Hostname() == "" || uB.Hostname() == "" {
+		return false
+	}
+	return strings.EqualFold(uA.Scheme, uB.Scheme) &&
+		strings.EqualFold(uA.Hostname(), uB.Hostname()) &&
+		effectivePort(uA) == effectivePort(uB)
+}
+
 type SystemOneModelOption struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`

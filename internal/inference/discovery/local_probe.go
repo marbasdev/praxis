@@ -3,11 +3,16 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"praxis/internal/inference/providers"
 )
 
 type LocalProbeTarget struct {
@@ -27,6 +32,7 @@ func defaultLocalProbeTargets() []LocalProbeTarget {
 	return []LocalProbeTarget{
 		{Label: "Ollama", Provider: "local", BaseURL: "http://127.0.0.1:11434/v1"},
 		{Label: "LM Studio", Provider: "local", BaseURL: "http://127.0.0.1:1234/v1"},
+		{Label: "LiteLLM Proxy", Provider: "local", BaseURL: "http://127.0.0.1:4000/v1"},
 		{Label: "Flide / OmniJev", Provider: "jev", BaseURL: "http://127.0.0.1:8000"},
 	}
 }
@@ -127,12 +133,8 @@ func probeSingleLocalTarget(ctx context.Context, target LocalProbeTarget) (Detec
 		return DetectedLocalServer{}, false
 	}
 
-	modelsURL := base
-	if !strings.HasSuffix(strings.ToLower(modelsURL), "/v1") {
-		modelsURL += "/v1"
-	}
-	modelsURL += "/models"
-	code, body, err := httpGetBody(cctx, localHandshakeClient, modelsURL, "", "", 32768)
+	modelsURL := providers.ResolveOpenAIModelsURL(base)
+	code, body, err := httpGetBody(cctx, localHandshakeClient, modelsURL, "", "", 128*1024)
 	if err != nil || code < 200 || code >= 300 {
 		return DetectedLocalServer{}, false
 	}
@@ -146,6 +148,52 @@ func probeSingleLocalTarget(ctx context.Context, target LocalProbeTarget) (Detec
 		BaseURL:  base,
 		Models:   models,
 	}, true
+}
+
+// DiscoverOpenAIEndpoint queries /models on a configured local or gateway OpenAI-compatible URL without leaking stored keys across origins.
+func DiscoverOpenAIEndpoint(ctx context.Context, rawCfg map[string]string, overrideURL, overrideKey string) ([]string, string) {
+	savedURL := EnvOrDefault(rawCfg["local_model_url"], "LOCAL_MODEL_URL", "")
+	targetURL := strings.TrimSpace(overrideURL)
+	if targetURL == "" {
+		targetURL = EnvOrDefault(savedURL, "", "http://127.0.0.1:11434/v1")
+	}
+
+	u, err := url.Parse(targetURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, "invalid OpenAI-compatible endpoint URL"
+	}
+
+	apiKey := strings.TrimSpace(overrideKey)
+	if apiKey == "" {
+		sameSavedOrigin := savedURL != "" && SameURLOrigin(targetURL, savedURL)
+		if overrideURL == "" || sameSavedOrigin {
+			apiKey = EnvOrDefault(rawCfg["local_api_key"], "LOCAL_API_KEY", "")
+			if apiKey == "" && (sameSavedOrigin || strings.EqualFold(u.Hostname(), "api.openai.com")) {
+				apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+			}
+		}
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+
+	bearerVal := ""
+	if apiKey != "" {
+		bearerVal = "Bearer " + apiKey
+	}
+	modelsURL := providers.ResolveOpenAIModelsURL(targetURL)
+	code, body, err := httpGetBody(cctx, systemOneClient, modelsURL, "Authorization", bearerVal, 4*1024*1024)
+	if err != nil {
+		return nil, fmt.Sprintf("endpoint unreachable (%s): %v", u.Host, err)
+	}
+	if code < 200 || code >= 300 {
+		return nil, fmt.Sprintf("GET /models returned HTTP %d from %s", code, u.Host)
+	}
+	models, ok := parseDiscoveredModelIDs(body)
+	if !ok {
+		return nil, fmt.Sprintf("invalid /models JSON payload from %s", u.Host)
+	}
+	return models, ""
 }
 
 func ProbeLocalInferenceServers(ctx context.Context, targets ...LocalProbeTarget) []DetectedLocalServer {

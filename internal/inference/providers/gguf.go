@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -15,9 +17,22 @@ import (
 	"praxis/internal/infra/config"
 )
 
+const maxModelsResponseBytes = 4 * 1024 * 1024
+
 var (
 	ggufClient      = &http.Client{Timeout: 30 * time.Second}
-	ggufProbeClient = &http.Client{Timeout: 300 * time.Millisecond}
+	ggufProbeClient = &http.Client{
+		Timeout: 300 * time.Millisecond,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	ggufRemoteProbeClient = &http.Client{
+		Timeout: 2500 * time.Millisecond,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 )
 
 type GGUFAdapter struct {
@@ -110,16 +125,62 @@ func extractJSONObject(raw string) []byte {
 	return []byte(s)
 }
 
-func resolveChatCompletionsURL(rawEndpoint string) string {
-	u := strings.TrimRight(strings.TrimSpace(rawEndpoint), "/")
-	switch {
-	case strings.HasSuffix(u, "/chat/completions"):
-		return u
-	case strings.HasSuffix(u, "/v1"):
-		return u + "/chat/completions"
-	default:
-		return u + "/v1/chat/completions"
+func hasOpenAIVersionPrefix(p string) bool {
+	low := strings.ToLower(strings.TrimRight(p, "/"))
+	if strings.HasSuffix(low, "/openai") {
+		return true
 	}
+	idx := strings.LastIndexByte(low, '/')
+	if idx < 0 {
+		return false
+	}
+	seg := low[idx+1:]
+	if len(seg) < 2 || seg[0] != 'v' {
+		return false
+	}
+	for i := 1; i < len(seg); i++ {
+		if seg[i] < '0' || seg[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func resolveOpenAISubpath(rawEndpoint, leaf string) string {
+	trimmed := strings.TrimSpace(rawEndpoint)
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		base := strings.TrimRight(trimmed, "/")
+		low := strings.ToLower(base)
+		if strings.HasSuffix(low, leaf) {
+			return base
+		}
+		if leaf == "/models" && strings.HasSuffix(low, "/chat/completions") {
+			return base[:len(base)-len("/chat/completions")] + "/models"
+		}
+		if hasOpenAIVersionPrefix(base) {
+			return base + leaf
+		}
+		return base + "/v1" + leaf
+	}
+	p := strings.TrimRight(u.Path, "/")
+	low := strings.ToLower(p)
+	switch {
+	case strings.HasSuffix(low, leaf):
+		u.Path = p
+	case leaf == "/models" && strings.HasSuffix(low, "/chat/completions"):
+		u.Path = p[:len(p)-len("/chat/completions")] + "/models"
+	case hasOpenAIVersionPrefix(p):
+		u.Path = p + leaf
+	default:
+		u.Path = p + "/v1" + leaf
+	}
+	u.RawPath = ""
+	return u.String()
+}
+
+func resolveChatCompletionsURL(rawEndpoint string) string {
+	return resolveOpenAISubpath(rawEndpoint, "/chat/completions")
 }
 
 func (g *GGUFAdapter) buildRequestPayload(prompt string, schema map[string]any, minimal bool) ([]byte, error) {
@@ -190,20 +251,35 @@ func resolveServerRootURL(rawEndpoint string) string {
 	return strings.TrimRight(u, "/")
 }
 
-func resolveModelsURL(rawEndpoint string) string {
-	u := strings.TrimRight(strings.TrimSpace(rawEndpoint), "/")
-	u = strings.TrimSuffix(u, "/chat/completions")
-	if !strings.HasSuffix(u, "/v1") {
-		u += "/v1"
+func ResolveOpenAIModelsURL(rawEndpoint string) string {
+	return resolveOpenAISubpath(rawEndpoint, "/models")
+}
+
+func isLoopbackEndpoint(rawEndpoint string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawEndpoint))
+	if err != nil {
+		return false
 	}
-	return u + "/models"
+	h := u.Hostname()
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (g *GGUFAdapter) probeEndpointContextTokens(ctx context.Context, ep string) (int, bool) {
-	pctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	loopback := g.prefix == "gguf:" || isLoopbackEndpoint(ep)
+	timeout := 2500 * time.Millisecond
+	probeHTTP := ggufRemoteProbeClient
+	if loopback {
+		timeout = 300 * time.Millisecond
+		probeHTTP = ggufProbeClient
+	}
+	pctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	get := func(targetURL string) ([]byte, bool) {
+	get := func(targetURL string, maxBytes int64) ([]byte, bool) {
 		req, err := http.NewRequestWithContext(pctx, http.MethodGet, targetURL, nil)
 		if err != nil {
 			return nil, false
@@ -211,11 +287,11 @@ func (g *GGUFAdapter) probeEndpointContextTokens(ctx context.Context, ep string)
 		if auth := bearerAuth(g.apiKey); auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
-		resp, err := ggufProbeClient.Do(req)
+		resp, err := probeHTTP.Do(req)
 		if err != nil {
 			return nil, false
 		}
-		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 		_ = resp.Body.Close()
 		if rerr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, false
@@ -223,38 +299,69 @@ func (g *GGUFAdapter) probeEndpointContextTokens(ctx context.Context, ep string)
 		return body, true
 	}
 
-	if root := resolveServerRootURL(ep); root != "" {
-		if body, ok := get(root + "/props"); ok {
-			var props struct {
-				DefaultGenerationSettings struct {
-					NCtx int `json:"n_ctx"`
-				} `json:"default_generation_settings"`
-			}
-			if json.Unmarshal(body, &props) == nil && props.DefaultGenerationSettings.NCtx > 0 {
-				return props.DefaultGenerationSettings.NCtx, true
+	if loopback {
+		if root := resolveServerRootURL(ep); root != "" {
+			if body, ok := get(root+"/props", 64*1024); ok {
+				var props struct {
+					DefaultGenerationSettings struct {
+						NCtx int `json:"n_ctx"`
+					} `json:"default_generation_settings"`
+				}
+				if json.Unmarshal(body, &props) == nil && props.DefaultGenerationSettings.NCtx > 0 {
+					return props.DefaultGenerationSettings.NCtx, true
+				}
 			}
 		}
 	}
 
 	if g.prefix == "local:" {
-		if body, ok := get(resolveModelsURL(ep)); ok {
+		if body, ok := get(ResolveOpenAIModelsURL(ep), maxModelsResponseBytes); ok {
+			type modelMeta struct {
+				ID                  string `json:"id"`
+				ContextLength       int    `json:"context_length"`
+				ContextWindow       int    `json:"context_window"`
+				MaxModelLen         int    `json:"max_model_len"`
+				LoadedContextLength int    `json:"loaded_context_length"`
+				MaxContextLength    int    `json:"max_context_length"`
+				MaxInputTokens      int    `json:"max_input_tokens"`
+				TopProvider         struct {
+					ContextLength int `json:"context_length"`
+				} `json:"top_provider"`
+				ModelInfo struct {
+					MaxInputTokens int `json:"max_input_tokens"`
+				} `json:"model_info"`
+			}
+			extractLimit := func(m modelMeta) int {
+				for _, lim := range []int{
+					m.LoadedContextLength,
+					m.MaxModelLen,
+					m.ContextLength,
+					m.ContextWindow,
+					m.MaxContextLength,
+					m.MaxInputTokens,
+					m.TopProvider.ContextLength,
+					m.ModelInfo.MaxInputTokens,
+				} {
+					if lim > 0 {
+						return lim
+					}
+				}
+				return 0
+			}
 			var modelsResp struct {
-				Data []struct {
-					ID                  string `json:"id"`
-					MaxModelLen         int    `json:"max_model_len"`
-					LoadedContextLength int    `json:"loaded_context_length"`
-					MaxContextLength    int    `json:"max_context_length"`
-				} `json:"data"`
+				Data []modelMeta `json:"data"`
 			}
 			if json.Unmarshal(body, &modelsResp) == nil {
 				for _, m := range modelsResp.Data {
-					if m.ID != "" && !strings.EqualFold(m.ID, g.model) && len(modelsResp.Data) > 1 {
-						continue
-					}
-					for _, lim := range []int{m.MaxModelLen, m.LoadedContextLength, m.MaxContextLength} {
-						if lim > 0 {
+					if strings.EqualFold(strings.TrimSpace(m.ID), g.model) {
+						if lim := extractLimit(m); lim > 0 {
 							return lim, true
 						}
+					}
+				}
+				if loopback && len(modelsResp.Data) == 1 {
+					if lim := extractLimit(modelsResp.Data[0]); lim > 0 {
+						return lim, true
 					}
 				}
 			}

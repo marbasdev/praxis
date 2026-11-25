@@ -69,8 +69,8 @@ Generic memory MCPs only let an agent **recall** past notes when it remembers to
 > Rule extraction, relevance scoring, and guardrail blocking **activate once an inference engine is connected**.
 
 Open the auto-started Web Console (**`http://127.0.0.1:18095`**) → **Engines** tab:
-- **macOS · Linux**: **1-click Local GGUF download** _(no API key · runs offline, or choose `Gemini` · `System 1` · `Custom Local URL`)_
-- **Windows**: Connect a **Custom Local URL** (`Ollama` · `LM Studio` · `vLLM`), `Gemini API key`, or `System 1` _(built-in GGUF unsupported)_
+- **macOS · Linux**: **1-click Local GGUF download** _(no API key · runs offline, or choose `Gemini` · `System 1` · `Custom URL (OpenAI-Compatible)`)_
+- **Windows**: Connect a **Custom URL** (`Ollama` · `LM Studio` · `vLLM` · `LiteLLM` · `OpenRouter`), `Gemini API key`, or `System 1` _(built-in GGUF unsupported)_
 - **Team Server / Multi-Device _(Optional)_**: Run `praxis connect` to use a shared server with zero local model setup — see [Team Guide](./TEAM.md)
 
 ### 3. Onboard Existing Codebases _(Auto-Suggested on First Chat)_

@@ -79,7 +79,7 @@ flowchart LR
 | `PRAXIS_MODELS_DIR` | `~/.praxis/models` | Managed local GGUF models and `llama-server` directory (`macOS`/`Linux`) |
 | `PRAXIS_PROVIDER` | `gguf` *(Unix)* / `local` *(Win)* | Active inference provider (`gguf` · `gemini` · `jev`/`flide` · `local`) |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | *(empty)* / `gemini-3.5-flash-lite` | Gemini API key and default model (`gemini-decision-1` uses `/v1beta/decisions`) |
-| `LOCAL_MODEL_URL` / `LOCAL_MODEL_NAME` | `http://127.0.0.1:11434/v1` / *(auto)* | OpenAI-compatible local server (`Ollama`, `LM Studio`, `vLLM`) |
+| `LOCAL_MODEL_URL` / `LOCAL_MODEL_NAME` | `http://127.0.0.1:11434/v1` / *(auto)* | OpenAI-compatible local/gateway endpoint (`Ollama`, `vLLM`, `LiteLLM`, `OpenRouter`; `LOCAL_API_KEY` optional) |
 | `JEV_API_URL` / `JEV_MODEL` | `http://127.0.0.1:8000` / `jev-latest` | System 1 judgment endpoint and model (`TYPESAFE_API_KEY` optional) |
 | `PRAXIS_REMOTE_URL` / `PRAXIS_REMOTE_TOKEN` | *(empty)* | Explicit Team Server URL and Bearer token override (supersedes `remotes.json`) |
 | `PRAXIS_DAEMON_ADDR` / `PRAXIS_HOOK_TIMEOUT` | `:18095` / *(manifest)* | Explicit daemon bind address and hook timeout (`8s`, disable with `0`/`off`) |

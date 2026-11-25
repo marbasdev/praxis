@@ -161,13 +161,13 @@ func (g *GeminiDecisionsAdapter) CallDecisions(ctx context.Context, input string
 		}
 		resp, err := postJSONRaw(ctx, httpClient, endpoint, body, "x-goog-api-key", g.apiKey)
 		if err != nil {
-			return nil, fmt.Errorf("gemini decisions endpoint unreachable: %w", err)
+			return nil, fmt.Errorf("gemini decisions endpoint unreachable: %w", redactProviderErr(err, g.apiKey))
 		}
 
 		if resp.StatusCode >= 300 {
-			errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_ = resp.Body.Close()
-			msg := geminiErrorMessage(errBytes)
+			msg := geminiErrorMessage(resp.StatusCode, errBytes, g.apiKey)
 			if msg != "" {
 				lastErr = fmt.Errorf("gemini decisions status %d: %s", resp.StatusCode, msg)
 			} else {

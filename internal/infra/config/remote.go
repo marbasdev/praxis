@@ -21,19 +21,49 @@ type RemoteBindingsFile struct {
 	Profiles map[string]domain.RemoteTargetConfig `json:"profiles,omitempty"`
 }
 
-func RemotesFilePath(dataDir string) string {
+const remotesTokenAAD = "remotes.token"
+
+func resolveRemotesDir(dataDir string) string {
 	dir := strings.TrimSpace(dataDir)
 	if dir == "" {
 		dir = DefaultDataDir()
 	}
+	return strings.TrimSpace(dir)
+}
+
+func RemotesFilePath(dataDir string) string {
+	dir := resolveRemotesDir(dataDir)
 	if dir == "" {
 		return ""
 	}
 	return filepath.Join(dir, "remotes.json")
 }
 
-func LoadRemoteBindings(dataDir string) RemoteBindingsFile {
-	p := RemotesFilePath(dataDir)
+func openRemoteTarget(dir string, t domain.RemoteTargetConfig) domain.RemoteTargetConfig {
+	if strings.TrimSpace(t.Token) != "" {
+		if plain, ok := openSecret(dir, remotesTokenAAD, t.Token); ok {
+			t.Token = plain
+		} else {
+			t.Token = ""
+		}
+	}
+	return t
+}
+
+func sealRemoteTarget(dir string, t domain.RemoteTargetConfig) (domain.RemoteTargetConfig, error) {
+	tok := strings.TrimSpace(t.Token)
+	if tok != "" && !IsSealedSecret(tok) {
+		sealed, err := sealSecret(dir, remotesTokenAAD, tok)
+		if err != nil {
+			return t, err
+		}
+		t.Token = sealed
+	}
+	return t, nil
+}
+
+func loadRawRemoteBindings(dir string) RemoteBindingsFile {
+	p := RemotesFilePath(dir)
 	if p == "" {
 		return RemoteBindingsFile{}
 	}
@@ -48,16 +78,101 @@ func LoadRemoteBindings(dataDir string) RemoteBindingsFile {
 	return out
 }
 
+func LoadRemoteBindings(dataDir string) RemoteBindingsFile {
+	dir := resolveRemotesDir(dataDir)
+	out := loadRawRemoteBindings(dir)
+	if out.Default != nil {
+		dec := openRemoteTarget(dir, *out.Default)
+		out.Default = &dec
+	}
+	for k, v := range out.Repos {
+		out.Repos[k] = openRemoteTarget(dir, v)
+	}
+	for k, v := range out.Profiles {
+		out.Profiles[k] = openRemoteTarget(dir, v)
+	}
+	return out
+}
+
 func saveRemoteBindings(dataDir string, f RemoteBindingsFile) error {
-	p := RemotesFilePath(dataDir)
+	dir := resolveRemotesDir(dataDir)
+	p := RemotesFilePath(dir)
 	if p == "" {
 		return fmt.Errorf("cannot resolve praxis data directory")
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
+	disk := RemoteBindingsFile{}
+	if f.Default != nil {
+		enc, err := sealRemoteTarget(dir, *f.Default)
+		if err != nil {
+			return err
+		}
+		disk.Default = &enc
+	}
+	if len(f.Repos) > 0 {
+		disk.Repos = make(map[string]domain.RemoteTargetConfig, len(f.Repos))
+		for k, v := range f.Repos {
+			enc, err := sealRemoteTarget(dir, v)
+			if err != nil {
+				return err
+			}
+			disk.Repos[k] = enc
+		}
+	}
+	if len(f.Profiles) > 0 {
+		disk.Profiles = make(map[string]domain.RemoteTargetConfig, len(f.Profiles))
+		for k, v := range f.Profiles {
+			enc, err := sealRemoteTarget(dir, v)
+			if err != nil {
+				return err
+			}
+			disk.Profiles[k] = enc
+		}
+	}
+	b, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return err
 	}
 	return writeFileAtomic0600(p, append(b, '\n'))
+}
+
+func migratePlaintextRemotes(dataDir string) {
+	dir := resolveRemotesDir(dataDir)
+	p := RemotesFilePath(dir)
+	if p == "" {
+		return
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return
+	}
+	var raw RemoteBindingsFile
+	if json.Unmarshal(b, &raw) != nil {
+		return
+	}
+	needsSeal := func(t domain.RemoteTargetConfig) bool {
+		tok := strings.TrimSpace(t.Token)
+		return tok != "" && !IsSealedSecret(tok)
+	}
+	hasPlain := raw.Default != nil && needsSeal(*raw.Default)
+	if !hasPlain {
+		for _, v := range raw.Repos {
+			if needsSeal(v) {
+				hasPlain = true
+				break
+			}
+		}
+	}
+	if !hasPlain {
+		for _, v := range raw.Profiles {
+			if needsSeal(v) {
+				hasPlain = true
+				break
+			}
+		}
+	}
+	if hasPlain {
+		_ = saveRemoteBindings(dir, raw)
+	}
 }
 
 func NormalizeRemoteURL(raw string) string {
@@ -77,7 +192,8 @@ func SaveRemoteBinding(dataDir, repoRoot string, global bool, target domain.Remo
 	if target.URL == "" || target.Token == "" {
 		return fmt.Errorf("remote url and token are required")
 	}
-	cur := LoadRemoteBindings(dataDir)
+	dir := resolveRemotesDir(dataDir)
+	cur := loadRawRemoteBindings(dir)
 	if cur.Repos == nil {
 		cur.Repos = make(map[string]domain.RemoteTargetConfig)
 	}
@@ -98,7 +214,7 @@ func SaveRemoteBinding(dataDir, repoRoot string, global bool, target domain.Remo
 		}
 		cur.Repos[cleanRepo] = target
 	}
-	return saveRemoteBindings(dataDir, cur)
+	return saveRemoteBindings(dir, cur)
 }
 
 func LookupRemoteProfile(dataDir, name string) (domain.RemoteTargetConfig, bool) {
@@ -111,7 +227,7 @@ func LookupRemoteProfile(dataDir, name string) (domain.RemoteTargetConfig, bool)
 		t.URL = NormalizeRemoteURL(t.URL)
 		return t, true
 	}
-	if cur.Default != nil && domain.NormalizeAccount(cur.Default.Account) == key {
+	if cur.Default != nil && domain.NormalizeAccount(cur.Default.Account) == key && strings.TrimSpace(cur.Default.Token) != "" {
 		t := *cur.Default
 		t.URL = NormalizeRemoteURL(t.URL)
 		return t, true
@@ -124,7 +240,8 @@ func RemoveRemoteProfile(dataDir, name string) (bool, error) {
 	if key == "" {
 		return false, nil
 	}
-	cur := LoadRemoteBindings(dataDir)
+	dir := resolveRemotesDir(dataDir)
+	cur := loadRawRemoteBindings(dir)
 	if cur.Profiles == nil {
 		return false, nil
 	}
@@ -132,11 +249,12 @@ func RemoveRemoteProfile(dataDir, name string) (bool, error) {
 		return false, nil
 	}
 	delete(cur.Profiles, key)
-	return true, saveRemoteBindings(dataDir, cur)
+	return true, saveRemoteBindings(dir, cur)
 }
 
 func RemoveRemoteBinding(dataDir, repoRoot string, global bool) (bool, error) {
-	cur := LoadRemoteBindings(dataDir)
+	dir := resolveRemotesDir(dataDir)
+	cur := loadRawRemoteBindings(dir)
 	removed := false
 	if global || strings.TrimSpace(repoRoot) == "" {
 		if cur.Default != nil {
@@ -156,7 +274,7 @@ func RemoveRemoteBinding(dataDir, repoRoot string, global bool) (bool, error) {
 	if !removed {
 		return false, nil
 	}
-	return true, saveRemoteBindings(dataDir, cur)
+	return true, saveRemoteBindings(dir, cur)
 }
 
 func ResolveRemoteTarget(dataDir, cwd string) (domain.RemoteTargetConfig, bool) {
@@ -178,7 +296,7 @@ func ResolveRemoteTarget(dataDir, cwd string) (domain.RemoteTargetConfig, bool) 
 		for repoKey, target := range bindings.Repos {
 			rk := filepath.Clean(repoKey)
 			if cwdClean == rk || strings.HasPrefix(cwdClean, rk+string(filepath.Separator)) {
-				if len(rk) > bestLen && NormalizeRemoteURL(target.URL) != "" {
+				if len(rk) > bestLen && NormalizeRemoteURL(target.URL) != "" && strings.TrimSpace(target.Token) != "" {
 					bestLen = len(rk)
 					best = target
 				}
@@ -189,7 +307,7 @@ func ResolveRemoteTarget(dataDir, cwd string) (domain.RemoteTargetConfig, bool) 
 			return best, true
 		}
 	}
-	if bindings.Default != nil && NormalizeRemoteURL(bindings.Default.URL) != "" {
+	if bindings.Default != nil && NormalizeRemoteURL(bindings.Default.URL) != "" && strings.TrimSpace(bindings.Default.Token) != "" {
 		def := *bindings.Default
 		def.URL = NormalizeRemoteURL(def.URL)
 		return def, true

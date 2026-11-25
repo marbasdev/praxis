@@ -194,6 +194,20 @@ func TestOpenAICompatibleAdapterAndMinimalJSONObjectFallback(t *testing.T) {
 		if lim := gwLite.InputTokenLimit(context.Background()); lim != 64000 {
 			t.Fatalf("expected model_info.max_input_tokens=64000 from LiteLLM-style /models payload, got %d", lim)
 		}
+
+		errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body>nginx error with key custom-gw-secret</body></html>"))
+		}))
+		defer errSrv.Close()
+		gwErr := NewOpenAICompatibleAdapter(errSrv.URL+"/v1", "qwen3:4b", "custom-gw-secret")
+		_, callErr := gwErr.ScoreRelevance(context.Background(), "test html error", []domain.Fact{
+			{ID: 1, Scope: "project:app", Category: "architecture", Content: "Rule"},
+		})
+		if callErr == nil || strings.Contains(callErr.Error(), "<html>") || strings.Contains(callErr.Error(), "custom-gw-secret") || !strings.Contains(callErr.Error(), "502 Bad Gateway (HTML proxy/gateway error page)") {
+			t.Fatalf("expected sanitized HTML error without raw tags or leaked secret, got %v", callErr)
+		}
 	})
 }
 

@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"praxis/internal/domain"
 )
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -158,12 +160,12 @@ func (j *JevAdapter) CallDecisions(ctx context.Context, state string, questions 
 	}
 	resp, err := postJSONRaw(ctx, httpClient, j.endpoint, body, "Authorization", bearerAuth(j.apiKey))
 	if err != nil {
-		return nil, fmt.Errorf("system 1 endpoint unreachable (%s): %w", j.endpoint, err)
+		return nil, fmt.Errorf("system 1 endpoint unreachable (%s): %w", j.endpoint, redactProviderErr(err, j.apiKey))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if msg := strings.TrimSpace(string(errBytes)); msg != "" {
+		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if msg := domain.SummarizeHTTPFailure(resp.StatusCode, errBytes, j.apiKey); msg != "" {
 			return nil, fmt.Errorf("system 1 status %d (%s): %s", resp.StatusCode, j.endpoint, msg)
 		}
 		return nil, fmt.Errorf("system 1 status %d (%s)", resp.StatusCode, j.endpoint)

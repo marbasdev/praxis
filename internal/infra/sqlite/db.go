@@ -73,6 +73,7 @@ func Open(dbPath string) (*sql.DB, error) {
 		return nil, err
 	}
 	if !isMemoryDSN(dbPath) {
+		config.MigratePlaintextSecrets(context.Background(), db, dbPath)
 		db.SetMaxOpenConns(maxDiskOpenConns)
 		db.SetMaxIdleConns(maxDiskOpenConns)
 	}

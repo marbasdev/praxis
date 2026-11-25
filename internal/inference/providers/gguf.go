@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"praxis/internal/domain"
 	"praxis/internal/infra/config"
 )
 
@@ -453,6 +454,7 @@ func (g *GGUFAdapter) CallJSON(ctx context.Context, prompt string, schema map[st
 		}
 	}
 	if err != nil {
+		err = redactProviderErr(err, g.apiKey)
 		if g.prefix == "gguf:" {
 			return 0, fmt.Errorf("local GGUF server unreachable (%s) — open %s (Engines tab) to download/start a GGUF model or switch engines: %w", g.currentEndpoint(), config.ActiveDaemonURL(""), err)
 		}
@@ -463,13 +465,13 @@ func (g *GGUFAdapter) CallJSON(ctx context.Context, prompt string, schema map[st
 		g.minimalOpenAI.Store(true)
 		resp, err = sendOnce(true)
 		if err != nil {
-			return 0, fmt.Errorf("OpenAI/GGUF fallback request failed (%s): %w", g.currentEndpoint(), err)
+			return 0, fmt.Errorf("OpenAI/GGUF fallback request failed (%s): %w", g.currentEndpoint(), redactProviderErr(err, g.apiKey))
 		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		msg := strings.TrimSpace(string(errBytes))
+		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := domain.SummarizeHTTPFailure(resp.StatusCode, errBytes, g.apiKey)
 		if msg != "" {
 			return 0, fmt.Errorf("OpenAI/GGUF status %d: %s", resp.StatusCode, msg)
 		}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"praxis/internal/domain"
 	"praxis/internal/inference/providers"
 )
 
@@ -163,7 +164,7 @@ func DiscoverSystemOneEndpoint(ctx context.Context, rawCfg map[string]string, ov
 			out.Source = "live_flide"
 		}
 	} else {
-		probeErr = err.Error()
+		probeErr = domain.RedactSecretsWith(err.Error(), apiKey)
 	}
 
 	var liveModels []SystemOneModelOption
@@ -216,7 +217,7 @@ func DiscoverSystemOneEndpoint(ctx context.Context, rawCfg map[string]string, ov
 			}
 		}
 	} else if err != nil && probeErr == "" {
-		probeErr = err.Error()
+		probeErr = domain.RedactSecretsWith(err.Error(), apiKey)
 	}
 
 	if out.ServedModel != "" && !seen[out.ServedModel] {

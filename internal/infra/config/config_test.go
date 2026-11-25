@@ -283,4 +283,85 @@ func TestRemoteProfilesLookupAndRemove(t *testing.T) {
 	if _, ok := config.LookupRemoteProfile(dataDir, "home"); ok {
 		t.Fatalf("expected removed profile home not found")
 	}
+
+	rawRemotes, err := os.ReadFile(config.RemotesFilePath(dataDir))
+	if err != nil {
+		t.Fatalf("read remotes.json: %v", err)
+	}
+	if strings.Contains(string(rawRemotes), "prx_work_tok") || !strings.Contains(string(rawRemotes), "enc:v1:") {
+		t.Fatalf("expected remotes.json token sealed at rest, got:\n%s", string(rawRemotes))
+	}
+}
+
+func TestVaultSealingMigrationAADAndMissingKeyGracefulFallback(t *testing.T) {
+	ctx := domain.WithAdminBypass(context.Background())
+	dirA := t.TempDir()
+	dbPathA := filepath.Join(dirA, "memories.db")
+
+	dbA, err := sqlite.Open(dbPathA)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer dbA.Close()
+
+	// Legacy plaintext row inserted before vault upgrade must auto-migrate on sqlite.Open.
+	if _, err := dbA.ExecContext(ctx, `INSERT INTO config(key, val) VALUES('gemini_api_key', 'AIzaLegacyPlaintextKey123456')`); err != nil {
+		t.Fatal(err)
+	}
+	_ = dbA.Close()
+
+	dbA, err = sqlite.Open(dbPathA)
+	if err != nil {
+		t.Fatalf("reopen sqlite: %v", err)
+	}
+	defer dbA.Close()
+
+	var rawStored string
+	if err := dbA.QueryRowContext(ctx, `SELECT val FROM config WHERE key = 'gemini_api_key'`).Scan(&rawStored); err != nil {
+		t.Fatal(err)
+	}
+	if !config.IsSealedSecret(rawStored) || strings.Contains(rawStored, "AIzaLegacy") {
+		t.Fatalf("expected legacy plaintext secret migrated to enc:v1: on Open, got %q", rawStored)
+	}
+	if runtime.GOOS != "windows" {
+		if info, err := os.Lstat(config.MasterKeyFilePath(dirA)); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("expected master.key perm 0600, got info=%v err=%v", info, err)
+		}
+	}
+	if got := config.GetConfigMap(ctx, dbA)["gemini_api_key"]; got != "AIzaLegacyPlaintextKey123456" {
+		t.Fatalf("expected transparent decryption via GetConfigMap, got %q", got)
+	}
+
+	// Saving local_api_key seals under its own AAD; swapping ciphertext into typesafe_api_key must fail closed to "".
+	if err := config.SaveConfig(ctx, dbA, dbPathA, map[string]string{"local_api_key": "sk-aad-bound-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	var localCipher string
+	_ = dbA.QueryRowContext(ctx, `SELECT val FROM config WHERE key = 'local_api_key'`).Scan(&localCipher)
+	if _, err := dbA.ExecContext(ctx, `INSERT INTO config(key, val) VALUES('typesafe_api_key', ?)`, localCipher); err != nil {
+		t.Fatal(err)
+	}
+	cfgA := config.GetConfigMap(ctx, dbA)
+	if cfgA["local_api_key"] != "sk-aad-bound-secret" || cfgA["typesafe_api_key"] != "" {
+		t.Fatalf("expected AAD-swapped typesafe_api_key to fail closed to empty, got local=%q typesafe=%q", cfgA["local_api_key"], cfgA["typesafe_api_key"])
+	}
+
+	// Copying memories.db to another directory without master.key must never leak raw enc:v1: ciphertext.
+	dirB := t.TempDir()
+	dbPathB := filepath.Join(dirB, "memories.db")
+	dbBytes, err := os.ReadFile(dbPathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPathB, dbBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dbB, err := sqlite.Open(dbPathB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dbB.Close()
+	if got := config.GetConfigMap(ctx, dbB)["gemini_api_key"]; got != "" {
+		t.Fatalf("expected missing master.key on copied DB to return empty key (never enc:v1:), got %q", got)
+	}
 }

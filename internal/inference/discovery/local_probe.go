@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"praxis/internal/domain"
 	"praxis/internal/inference/providers"
 )
 
@@ -184,9 +185,12 @@ func DiscoverOpenAIEndpoint(ctx context.Context, rawCfg map[string]string, overr
 	modelsURL := providers.ResolveOpenAIModelsURL(targetURL)
 	code, body, err := httpGetBody(cctx, systemOneClient, modelsURL, "Authorization", bearerVal, 4*1024*1024)
 	if err != nil {
-		return nil, fmt.Sprintf("endpoint unreachable (%s): %v", u.Host, err)
+		return nil, fmt.Sprintf("endpoint unreachable (%s): %s", u.Host, domain.RedactSecretsWith(err.Error(), apiKey))
 	}
 	if code < 200 || code >= 300 {
+		if summary := domain.SummarizeHTTPFailure(code, body, apiKey); summary != "" {
+			return nil, fmt.Sprintf("GET /models HTTP %d (%s): %s", code, u.Host, summary)
+		}
 		return nil, fmt.Sprintf("GET /models returned HTTP %d from %s", code, u.Host)
 	}
 	models, ok := parseDiscoveredModelIDs(body)

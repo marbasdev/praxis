@@ -3,8 +3,10 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -122,20 +124,42 @@ func geminiBaseURL() string {
 	return strings.TrimRight(base, "/")
 }
 
-func geminiErrorMessage(errBytes []byte) string {
-	msg := strings.TrimSpace(string(errBytes))
-	var apiErr struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
+type redactedNetError struct {
+	msg     string
+	timeout bool
+	cause   error
+}
+
+func (e redactedNetError) Error() string   { return e.msg }
+func (e redactedNetError) Timeout() bool   { return e.timeout }
+func (e redactedNetError) Temporary() bool { return false }
+func (e redactedNetError) Unwrap() error   { return e.cause }
+
+func redactProviderErr(err error, extraSecrets ...string) error {
+	if err == nil {
+		return nil
 	}
-	if json.Unmarshal(errBytes, &apiErr) == nil && apiErr.Error.Message != "" {
-		msg = apiErr.Error.Message
+	red := domain.RedactSecretsWith(err.Error(), extraSecrets...)
+	if red == err.Error() {
+		return err
 	}
-	if len(msg) > 360 {
-		msg = msg[:360] + "..."
+	isTO := os.IsTimeout(err)
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		isTO = true
 	}
-	return msg
+	var safeCause error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		safeCause = context.DeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		safeCause = context.Canceled
+	}
+	return redactedNetError{msg: red, timeout: isTO, cause: safeCause}
+}
+
+func geminiErrorMessage(status int, errBytes []byte, apiKey string) string {
+	return domain.SummarizeHTTPFailure(status, errBytes, apiKey)
 }
 
 func (g *GeminiAdapter) Name() string { return "gemini:" + g.model }
@@ -255,12 +279,12 @@ func (g *GeminiAdapter) doGenerateJSON(ctx context.Context, model, prompt string
 	}
 	resp, err := postJSONRaw(ctx, httpClient, endpoint, body, "x-goog-api-key", g.apiKey)
 	if err != nil {
-		return 0, "", err
+		return 0, "", redactProviderErr(err, g.apiKey)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		msg := geminiErrorMessage(errBytes)
+		errBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := geminiErrorMessage(resp.StatusCode, errBytes, g.apiKey)
 		lowerMsg := strings.ToLower(msg)
 		if withLogprobs && resp.StatusCode == http.StatusBadRequest && strings.Contains(lowerMsg, "logprob") {
 			return 0, "logprobs", fmt.Errorf("logprobs unsupported on %s", model)

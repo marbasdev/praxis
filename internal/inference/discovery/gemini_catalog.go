@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"praxis/internal/domain"
 )
 
 var geminiCatalogClient = &http.Client{
@@ -86,17 +88,12 @@ func DiscoverGeminiModels(ctx context.Context, rawCfg map[string]string, overrid
 
 	code, body, err := httpGetBody(cctx, geminiCatalogClient, base+"/v1beta/models?pageSize=100", "x-goog-api-key", apiKey, 1<<20)
 	if err != nil {
-		return DefaultGeminiModels(), "builtin", err.Error()
+		return DefaultGeminiModels(), "builtin", domain.RedactSecretsWith(err.Error(), apiKey)
 	}
 	if code >= 300 {
-		var apiErr struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		msg := fmt.Sprintf("HTTP %d", code)
-		if json.Unmarshal(body, &apiErr) == nil && apiErr.Error.Message != "" {
-			msg = apiErr.Error.Message
+		msg := domain.SummarizeHTTPFailure(code, body, apiKey)
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", code)
 		}
 		return DefaultGeminiModels(), "builtin", msg
 	}

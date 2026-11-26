@@ -37,7 +37,7 @@ flowchart LR
 | Layer | Packages | Responsibility & Boundary |
 | :--- | :--- | :--- |
 | **1. Domain** | `internal/domain` | Stdlib-only domain models, normalization, and secret redaction (`Fact`, `Scope`, `RulePack`, `MemoryBundle`) |
-| **2. Infra** | `internal/infra/{config,sqlite,git,eventbus}` | Config files (`ports.json`, `remotes.json`), SQLite `WAL` & auth store, isolated `git worktree` ops, SSE event bus |
+| **2. Infra** | `internal/infra/{config,sqlite,git,eventbus}` | Config & AES-256-GCM vault (`ports.json`, `remotes.json`, `master.key`), SQLite `WAL` & auth store, isolated `git worktree` ops, SSE event bus |
 | **3. Inference** | `internal/inference/{router,providers,discovery,localmodel}` | Per-task router & cooldown fallback, `GGUF` · `Gemini` · `System 1` · OpenAI-compatible adapters, `llama-server` lifecycle |
 | **4. Modules** | `internal/modules/{memory,progress,rulepack,guardrail}` | Rule lifecycle/consolidation/bundles, activity feed (`project_progress`), `.praxis/TEAM_RULES.md` sync, guardrails & onboarding |
 | **5. Transport** | `internal/transport/{cli,mcp,http,dashboard}` | CLI commands, MCP protocol bridge, loopback CSRF & proxy-guarded HTTP mux, 6-tab HTMX + Alpine SSR Web Console |

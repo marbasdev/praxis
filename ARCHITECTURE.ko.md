@@ -37,7 +37,7 @@ flowchart LR
 | 계층 | 패키지 | 책임 및 경계 |
 | :--- | :--- | :--- |
 | **1. Domain** | `internal/domain` | 외부 패키지 의존 없는 순수 모델·정규화·보안 마스킹 (`Fact`, `Scope`, `RulePack`, `MemoryBundle`) |
-| **2. Infra** | `internal/infra/{config,sqlite,git,eventbus}` | 설정 파일(`ports.json`, `remotes.json`), SQLite `WAL`·스키마·인증 저장소, 격리 `git worktree` 실행, SSE 이벤트 버스 |
+| **2. Infra** | `internal/infra/{config,sqlite,git,eventbus}` | 설정 파일·AES-256-GCM 볼트(`ports.json`, `remotes.json`, `master.key`), SQLite `WAL`·스키마·인증 저장소, 격리 `git worktree` 실행, SSE 이벤트 버스 |
 | **3. Inference** | `internal/inference/{router,providers,discovery,localmodel}` | 태스크 라우터·쿨다운 폴백, `GGUF`·`Gemini`·`System 1`·OpenAI 호환 어댑터, `llama-server` 수명주기(`macOS`/`Linux`) |
 | **4. Modules** | `internal/modules/{memory,progress,rulepack,guardrail}` | 기억 상태 관리·병합·번들, 활동 타임라인(`project_progress`), `.praxis/TEAM_RULES.md` 동기화, 가드레일·온보딩 |
 | **5. Transport** | `internal/transport/{cli,mcp,http,dashboard}` | CLI 명령, MCP 프로토콜 브리지, 루프백 CSRF·프록시 보안 HTTP 계층, 6탭 HTMX + Alpine SSR 웹 콘솔 |

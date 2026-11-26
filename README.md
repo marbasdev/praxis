@@ -155,6 +155,7 @@ sqlite3 ~/.praxis/memories.db ".backup './memories-backup.db'"
 rm -f ~/.praxis/memories.db-wal ~/.praxis/memories.db-shm
 cp ./memories-backup.db ~/.praxis/memories.db && ~/.praxis/bin/praxis daemon start
 ```
+_Stored API keys and `remotes.json` tokens are sealed with `~/.praxis/master.key`; include `master.key` when migrating to another machine if you want saved credentials preserved (without it, memories still restore cleanly and API keys can simply be re-entered)._
 
 ### Uninstall
 ```bash

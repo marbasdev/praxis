@@ -155,6 +155,7 @@ sqlite3 ~/.praxis/memories.db ".backup './memories-backup.db'"
 rm -f ~/.praxis/memories.db-wal ~/.praxis/memories.db-shm
 cp ./memories-backup.db ~/.praxis/memories.db && ~/.praxis/bin/praxis daemon start
 ```
+_저장된 API 키와 `remotes.json` 토큰은 `~/.praxis/master.key`로 암호화되므로, 다른 기기로 전체 이관할 때 기존 인증 정보까지 유지하려면 `master.key`도 함께 백업하세요(키가 없어도 기억 데이터는 그대로 복원되며 API 키만 다시 입력하면 됩니다)._
 
 ### 삭제
 ```bash

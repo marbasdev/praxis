@@ -18,6 +18,52 @@ type matchedItem struct {
 	suffix string
 }
 
+func (s *Service) filterTurnUncheckedCandidates(sessionID, scope, category, taskSig string, candidates []domain.Fact) []domain.Fact {
+	if sessionID == "" || taskSig == "" || len(candidates) == 0 {
+		return candidates
+	}
+	key := sessionID + "\x00" + scope + "\x00" + category
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry := s.relCache[key]
+	if entry == nil || entry.taskSig != taskSig {
+		return candidates
+	}
+	s.touchRelCacheLocked(key, time.Now())
+	var pending []domain.Fact
+	for _, f := range candidates {
+		if prevContent, ok := entry.checked[f.ID]; !ok || prevContent != f.Content {
+			pending = append(pending, f)
+		}
+	}
+	return pending
+}
+
+func (s *Service) recordTurnCheckedCandidates(sessionID, scope, category, taskSig string, evaluated []domain.Fact) {
+	if sessionID == "" || taskSig == "" || len(evaluated) == 0 {
+		return
+	}
+	key := sessionID + "\x00" + scope + "\x00" + category
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.relCache == nil {
+		s.relCache = make(map[string]*relEvalCacheEntry)
+	}
+	entry := s.relCache[key]
+	if entry == nil || entry.taskSig != taskSig {
+		entry = &relEvalCacheEntry{
+			taskSig: taskSig,
+			checked: make(map[int64]string, len(evaluated)),
+		}
+		s.relCache[key] = entry
+	}
+	for _, f := range evaluated {
+		entry.checked[f.ID] = f.Content
+	}
+	s.touchRelCacheLocked(key, now)
+}
+
 func (s *Service) snapshotSessionSeen(ctx context.Context, sessionID string, refresh bool) map[int64]bool {
 	if sessionID == "" {
 		return nil
@@ -28,6 +74,13 @@ func (s *Service) snapshotSessionSeen(ctx context.Context, sessionID string, ref
 	defer s.mu.Unlock()
 	if refresh {
 		s.sent[sessionID] = make(map[int64]bool)
+		prefix := sessionID + "\x00"
+		for k := range s.relCache {
+			if strings.HasPrefix(k, prefix) {
+				delete(s.relCache, k)
+				delete(s.relTouch, k)
+			}
+		}
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM session_sent WHERE session_id = ?`, sessionID)
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM session_updates WHERE session_id = ?`, sessionID)
 	} else if s.sent[sessionID] == nil {
@@ -277,7 +330,7 @@ func (s *Service) QuerySessionMemory(ctx context.Context, sessionID, currentTask
 	}
 	if len(facts) == 0 {
 		if refresh && sessionID != "" {
-			_, _ = s.db.ExecContext(ctx, `DELETE FROM session_updates WHERE session_id = ?`, sessionID)
+			_ = s.snapshotSessionSeen(ctx, sessionID, true)
 		}
 		revokedNotice += s.applySessionSuperseded(ctx, sessionID, refresh, nil)
 		if revokedNotice != "" {
@@ -328,36 +381,42 @@ func (s *Service) QuerySessionMemory(ctx context.Context, sessionID, currentTask
 		}
 		matched = append(matched, matchedItem{fact: f, suffix: suf})
 	}
-	hasTaskPrompt := strings.TrimSpace(currentTask) != ""
+	normTask := strings.TrimSpace(currentTask)
+	hasTaskPrompt := normTask != ""
 	if len(unsentCandidates) > 0 && hasTaskPrompt {
-		ev := s.router.EvalForTask(ctx, domain.TaskRelevance)
-		if ev == nil {
-			return "", fmt.Errorf("no active evaluation engine configured")
-		}
-		evalStart := time.Now()
-		scored, err := ev.ScoreRelevance(ctx, currentTask, unsentCandidates)
-		s.router.RecordTelemetry(ctx, domain.TaskRelevance, ev, evalStart, len(unsentCandidates), err)
-		if err != nil {
-			if sessionID == "" || (len(matched) == 0 && revokedNotice == "") {
-				return "", err
+		taskSig := fmt.Sprintf("%s\x00%.2f\x00%.2f\x00%t", normTask, th.MinRelevance, th.MinRelConfidence, s.IncludePersonalInProject(ctx))
+		toEval := s.filterTurnUncheckedCandidates(sessionID, scA, category, taskSig, unsentCandidates)
+		if len(toEval) > 0 {
+			ev := s.router.EvalForTask(ctx, domain.TaskRelevance)
+			if ev == nil {
+				return "", fmt.Errorf("no active evaluation engine configured")
 			}
-		} else {
-			sort.Slice(scored, func(i, j int) bool {
-				if scored[i].Score != scored[j].Score {
-					return scored[i].Score > scored[j].Score
+			evalStart := time.Now()
+			scored, err := ev.ScoreRelevance(ctx, currentTask, toEval)
+			s.router.RecordTelemetry(ctx, domain.TaskRelevance, ev, evalStart, len(toEval), err)
+			if err != nil {
+				if sessionID == "" || (len(matched) == 0 && revokedNotice == "") {
+					return "", err
 				}
-				return scored[i].ID < scored[j].ID
-			})
-			for _, sf := range scored {
-				if sf.Score >= th.MinRelevance && sf.Confidence >= th.MinRelConfidence {
-					sfx := ""
-					if sessionID == "" {
-						sfx = fmt.Sprintf(" *(score: %.1f, conf: %.2f)*", sf.Score, sf.Confidence)
+			} else {
+				s.recordTurnCheckedCandidates(sessionID, scA, category, taskSig, toEval)
+				sort.Slice(scored, func(i, j int) bool {
+					if scored[i].Score != scored[j].Score {
+						return scored[i].Score > scored[j].Score
 					}
-					matched = append(matched, matchedItem{
-						fact:   sf.Fact,
-						suffix: sfx,
-					})
+					return scored[i].ID < scored[j].ID
+				})
+				for _, sf := range scored {
+					if sf.Score >= th.MinRelevance && sf.Confidence >= th.MinRelConfidence {
+						sfx := ""
+						if sessionID == "" {
+							sfx = fmt.Sprintf(" *(score: %.1f, conf: %.2f)*", sf.Score, sf.Confidence)
+						}
+						matched = append(matched, matchedItem{
+							fact:   sf.Fact,
+							suffix: sfx,
+						})
+					}
 				}
 			}
 		}

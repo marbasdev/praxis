@@ -5,14 +5,14 @@
       {
         "type": "command",
         "command": "sh ./scripts/run-praxis.sh -hook antigravity-start",
-        "timeout": 8
+        "timeout": 12
       }
     ],
     "PreInvocation": [
       {
         "type": "command",
         "command": "sh ./scripts/run-praxis.sh -hook antigravity-turn",
-        "timeout": 8
+        "timeout": 12
       }
     ],
     "PreToolUse": [
@@ -22,7 +22,7 @@
           {
             "type": "command",
             "command": "sh ./scripts/run-praxis.sh -hook antigravity-pretool",
-            "timeout": 8
+            "timeout": 12
           }
         ]
       }
@@ -31,7 +31,7 @@
       {
         "type": "command",
         "command": "sh ./scripts/run-praxis.sh -hook antigravity-stop",
-        "timeout": 15
+        "timeout": 20
       }
     ]
   }

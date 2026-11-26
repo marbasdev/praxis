@@ -175,6 +175,48 @@ func TestRouterCircuitBreakerCooldownAndFallback(t *testing.T) {
 	if decHits.Load() != 1 || flashHits.Load() != 2 {
 		t.Fatalf("expected cooldown to skip decisions endpoint (decHits=1, flashHits=2), got dec=%d flash=%d", decHits.Load(), flashHits.Load())
 	}
+
+	t.Run("hung_primary_reserves_deadline_budget_for_fallback_and_trips_cooldown", func(t *testing.T) {
+		var hungHits, fbHits atomic.Int32
+		stopSrv := make(chan struct{})
+		hungSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1beta/decisions" {
+				hungHits.Add(1)
+				select {
+				case <-r.Context().Done():
+				case <-stopSrv:
+				}
+				return
+			}
+			fbHits.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"items\":[{\"id\":1,\"score\":4.6,\"confidence\":0.95}]}"}]},"avgLogprobs":-0.01}]}`))
+		}))
+		defer func() {
+			close(stopSrv)
+			hungSrv.Close()
+		}()
+		t.Setenv("GEMINI_API_BASE", hungSrv.URL)
+
+		hungRes := NewTaskResolverWithEndpoint(nil)
+		evHung, _ := hungRes(cfg, domain.TaskRelevance)
+		deadlineCtx, cancel := context.WithTimeout(context.Background(), 2100*time.Millisecond)
+		defer cancel()
+
+		got, err := evHung.ScoreRelevance(deadlineCtx, "database setup", facts)
+		if err != nil || len(got) != 1 || got[0].Score != 4.6 {
+			t.Fatalf("expected hung primary to yield reserved budget to fallback, got %+v err=%v", got, err)
+		}
+		if hungHits.Load() != 1 || fbHits.Load() != 1 {
+			t.Fatalf("expected 1 hung primary attempt + 1 fallback success, got hung=%d fb=%d", hungHits.Load(), fbHits.Load())
+		}
+
+		evNext, _ := hungRes(cfg, domain.TaskRelevance)
+		_, err = evNext.ScoreRelevance(context.Background(), "database setup", facts)
+		if err != nil || hungHits.Load() != 1 || fbHits.Load() != 2 {
+			t.Fatalf("expected hung primary timeout to trip cooldown on subsequent call, got hung=%d fb=%d err=%v", hungHits.Load(), fbHits.Load(), err)
+		}
+	})
 }
 
 func TestFallbackEvaluatorInputTokenLimitPropagation(t *testing.T) {

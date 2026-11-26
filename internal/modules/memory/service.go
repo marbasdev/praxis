@@ -40,6 +40,11 @@ type ExtraFactsProvider interface {
 	LoadExtraFacts(ctx context.Context, scopeA, scopeB, category string) ([]domain.Fact, error)
 }
 
+type relEvalCacheEntry struct {
+	taskSig string
+	checked map[int64]string
+}
+
 type Service struct {
 	db               *sql.DB
 	dbPath           string
@@ -48,6 +53,8 @@ type Service struct {
 	mu               sync.Mutex
 	sent             map[string]map[int64]bool
 	sentTouch        map[string]time.Time
+	relCache         map[string]*relEvalCacheEntry
+	relTouch         map[string]time.Time
 	syncSeen         map[string]string
 	syncTouch        map[string]time.Time
 	autoGitSync      bool
@@ -70,6 +77,8 @@ func New(db *sql.DB, dbPath string, rtr *router.Router, bus *eventbus.Bus) *Serv
 		bus:       bus,
 		sent:      make(map[string]map[int64]bool),
 		sentTouch: make(map[string]time.Time),
+		relCache:  make(map[string]*relEvalCacheEntry),
+		relTouch:  make(map[string]time.Time),
 		syncSeen:  make(map[string]string),
 		syncTouch: make(map[string]time.Time),
 	}
@@ -142,6 +151,41 @@ func (s *Service) touchSyncSeenLocked(key string, now time.Time) {
 		}
 		delete(s.syncSeen, oldestKey)
 		delete(s.syncTouch, oldestKey)
+	}
+}
+
+func (s *Service) touchRelCacheLocked(key string, now time.Time) {
+	if s.relTouch == nil {
+		s.relTouch = make(map[string]time.Time)
+	}
+	s.relTouch[key] = now
+	if len(s.relCache) <= maxCachedMemorySessions {
+		return
+	}
+	for k, ts := range s.relTouch {
+		if k != key && now.Sub(ts) > memorySessionIdleTTL {
+			delete(s.relCache, k)
+			delete(s.relTouch, k)
+		}
+	}
+	for len(s.relCache) > maxCachedMemorySessions {
+		oldestKey := ""
+		var oldestTime time.Time
+		for k := range s.relCache {
+			if k == key {
+				continue
+			}
+			ts := s.relTouch[k]
+			if oldestKey == "" || ts.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = ts
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(s.relCache, oldestKey)
+		delete(s.relTouch, oldestKey)
 	}
 }
 
@@ -239,6 +283,13 @@ func (s *Service) InvalidateSessionIDs(ctx context.Context, ids ...int64) {
 	for _, seen := range s.sent {
 		for id := range idSet {
 			delete(seen, id)
+		}
+	}
+	for _, entry := range s.relCache {
+		if entry != nil {
+			for id := range idSet {
+				delete(entry.checked, id)
+			}
 		}
 	}
 	s.mu.Unlock()

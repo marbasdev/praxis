@@ -379,7 +379,7 @@ func registerSSRCalibrateRoutes(mux *http.ServeMux, d Deps) {
 			Lang:       lang,
 			ElapsedMs:  res.ElapsedMs,
 			PassCount:  passCnt,
-			TotalCount: len(res.Pinned) + len(res.Scored),
+			TotalCount: max(res.TotalCount, len(res.Pinned)+len(res.Scored)),
 			Pinned:     res.Pinned,
 			Scored:     scored,
 		})

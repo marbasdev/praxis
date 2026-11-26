@@ -69,6 +69,48 @@ func TestGeminiZeroThinkingFallbackAndThoughtPartFiltering(t *testing.T) {
 	if err != nil || calls.Load() != 3 {
 		t.Fatalf("expected cached noThinking to succeed in 1 call (total 3), got total=%d err=%v", calls.Load(), err)
 	}
+
+	t.Run("latest_alias_zero_thinking_and_sparse_relevance_omission", func(t *testing.T) {
+		var sawZeroThink atomic.Bool
+		var sawLegacyThink atomic.Bool
+		aliasSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var reqBody struct {
+				GenerationConfig map[string]any `json:"generationConfig"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&reqBody)
+			if tc, ok := reqBody.GenerationConfig["thinkingConfig"].(map[string]any); ok && tc["thinkingBudget"] == float64(0) {
+				if strings.Contains(r.URL.Path, "gemini-flash-lite-latest") {
+					sawZeroThink.Store(true)
+				}
+				if strings.Contains(r.URL.Path, "gemini-2.0-flash") {
+					sawLegacyThink.Store(true)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"{\"items\":[{\"id\":2,\"score\":4.5,\"confidence\":0.94}]}"}]},"avgLogprobs":-0.02}]}`))
+		}))
+		defer aliasSrv.Close()
+		t.Setenv("GEMINI_API_BASE", aliasSrv.URL)
+
+		evLatest := NewGeminiAdapterConfig("test-key", "gemini-flash-lite-latest")
+		got, err := evLatest.ScoreRelevance(context.Background(), "auth middleware", []domain.Fact{
+			{ID: 1, Scope: "project:app", Category: "ui", Content: "Unrelated UI note"},
+			{ID: 2, Scope: "project:app", Category: "security", Content: "Use HttpOnly cookies"},
+			{ID: 3, Scope: "project:app", Category: "docs", Content: "Unrelated README note"},
+		})
+		if err != nil || !sawZeroThink.Load() || len(got) != 1 {
+			t.Fatalf("expected gemini-flash-lite-latest to send thinkingBudget=0 and return 1 sparse item, got zeroThink=%v len=%d err=%v", sawZeroThink.Load(), len(got), err)
+		}
+		if got[0].ID != 2 || got[0].Score != 4.5 || got[0].Confidence != 0.94 {
+			t.Fatalf("expected sparse matched item #2 (4.5, conf 0.94), got %+v", got)
+		}
+
+		evLegacy := NewGeminiAdapterConfig("test-key", "gemini-2.0-flash")
+		_, _ = evLegacy.ScoreRelevance(context.Background(), "auth", []domain.Fact{{ID: 2, Scope: "project:app", Category: "security", Content: "Rule"}})
+		if sawLegacyThink.Load() {
+			t.Fatalf("expected legacy gemini-2.0-flash to omit thinkingConfig")
+		}
+	})
 }
 
 func TestGeminiQuota429ModelFallbackAndCooldown(t *testing.T) {

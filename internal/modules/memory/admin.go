@@ -253,7 +253,7 @@ func (s *Service) GetDashboardFacets(ctx context.Context) (domain.DashboardFacet
 
 func (s *Service) DiagnoseRelevance(ctx context.Context, rawScope, query string) (domain.ProbeResult, error) {
 	t0 := time.Now()
-	_, _, ev, pinned, scored, err := s.evaluateRelevance(ctx, rawScope, "", query)
+	_, totalFacts, ev, pinned, scored, err := s.evaluateRelevance(ctx, rawScope, "", query)
 	if err != nil {
 		return domain.ProbeResult{}, err
 	}
@@ -264,6 +264,7 @@ func (s *Service) DiagnoseRelevance(ctx context.Context, rawScope, query string)
 	return domain.ProbeResult{
 		Provider:   provName,
 		ElapsedMs:  domain.ElapsedMsSince(t0),
+		TotalCount: totalFacts,
 		Thresholds: s.GetThresholds(ctx),
 		Pinned:     pinned,
 		Scored:     scored,

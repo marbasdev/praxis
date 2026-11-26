@@ -97,10 +97,10 @@ func (e *schemaEvaluator) ScoreRelevance(ctx context.Context, currentTask string
 		return nil, nil
 	}
 	var sb strings.Builder
-	sb.WriteString(`Evaluate each fact individually against the Current Task and return per-item "score" and "confidence":
-- score (0.0 to 5.0): 4.5-5.0 critical constraint directly governing the task; 3.5-4.4 directly applicable rule/context; 2.0-3.4 indirect background; 0.0-1.9 unrelated.
-- confidence (0.00 to 1.00, 5-band certainty scale per item):
-  * 0.95-1.00: unambiguous, explicit core architecture/safety rule or exact task match/non-match.
+	sb.WriteString(`Evaluate each fact individually against the Current Task and return ONLY facts with score >= 0.5 in "items" (omit completely unrelated facts with score < 0.5; return an empty "items" array if none apply):
+- score (0.5 to 5.0): 4.5-5.0 critical constraint directly governing the task; 3.5-4.4 directly applicable rule/context; 2.0-3.4 indirect background; 0.5-1.9 tangential context (omit < 0.5).
+- confidence (0.00 to 1.00, 5-band certainty scale per returned item):
+  * 0.95-1.00: unambiguous, explicit core architecture/safety rule or exact task match.
   * 0.90-0.94: clear, concrete architectural/domain applicability.
   * 0.85-0.89: standard convention or clear contextual match.
   * 0.80-0.84: soft preference or situational match.
@@ -136,8 +136,10 @@ Facts:
 		return nil, err
 	}
 	res := make([]domain.ScoredFact, 0, len(parsed.Items))
+	seen := make(map[int64]bool, len(parsed.Items))
 	for _, it := range parsed.Items {
-		if f, ok := factMap[it.ID]; ok {
+		if f, ok := factMap[it.ID]; ok && !seen[it.ID] {
+			seen[it.ID] = true
 			c := clampProb(it.Confidence)
 			if it.Confidence <= 0 {
 				c = fallbackConf

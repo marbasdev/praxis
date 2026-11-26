@@ -154,15 +154,29 @@ func runWithFallback[T any](
 	ctx context.Context,
 	f *fallbackEvaluator,
 	task domain.EvalTask,
-	call func(ev domain.Evaluator) (T, error),
+	call func(callCtx context.Context, ev domain.Evaluator) (T, error),
 ) (T, error) {
 	primaryOK := f.primary != nil && domain.EvaluatorSupportsTask(f.primary, task)
 	fallbackOK := f.fallback != nil && domain.EvaluatorSupportsTask(f.fallback, task) &&
 		(f.primary == nil || f.fallback.Name() != f.primary.Name())
 
+	isFastHookTask := task == domain.TaskRelevance || task == domain.TaskVerify || task == domain.TaskMutation
 	if primaryOK && (!fallbackOK || !f.tracker.isCoolingDown(f.primary.Name())) {
 		f.setUsed(f.primary.Name())
-		res, err := call(f.primary)
+		primaryCtx := ctx
+		var cancelPrimary context.CancelFunc
+		if fallbackOK && isFastHookTask && ctx != nil {
+			if dl, hasDL := ctx.Deadline(); hasDL {
+				if rem := time.Until(dl); rem >= 2*time.Second && rem <= 25*time.Second {
+					reserve := min(3*time.Second, rem*2/5)
+					primaryCtx, cancelPrimary = context.WithTimeout(ctx, rem-reserve)
+				}
+			}
+		}
+		res, err := call(primaryCtx, f.primary)
+		if cancelPrimary != nil {
+			cancelPrimary()
+		}
 		if err == nil {
 			f.tracker.clear(f.primary.Name())
 			return res, nil
@@ -177,7 +191,7 @@ func runWithFallback[T any](
 
 	if fallbackOK {
 		f.setUsed(f.fallback.Name())
-		return call(f.fallback)
+		return call(ctx, f.fallback)
 	}
 
 	var zero T
@@ -185,25 +199,25 @@ func runWithFallback[T any](
 }
 
 func (f *fallbackEvaluator) ScoreRelevance(ctx context.Context, currentTask string, facts []domain.Fact) ([]domain.ScoredFact, error) {
-	return runWithFallback(ctx, f, domain.TaskRelevance, func(ev domain.Evaluator) ([]domain.ScoredFact, error) {
-		return ev.ScoreRelevance(ctx, currentTask, facts)
+	return runWithFallback(ctx, f, domain.TaskRelevance, func(callCtx context.Context, ev domain.Evaluator) ([]domain.ScoredFact, error) {
+		return ev.ScoreRelevance(callCtx, currentTask, facts)
 	})
 }
 
 func (f *fallbackEvaluator) EvaluateMutation(ctx context.Context, scope, candidate string, existing []domain.Fact) (domain.MutationDecision, error) {
-	return runWithFallback(ctx, f, domain.TaskMutation, func(ev domain.Evaluator) (domain.MutationDecision, error) {
-		return ev.EvaluateMutation(ctx, scope, candidate, existing)
+	return runWithFallback(ctx, f, domain.TaskMutation, func(callCtx context.Context, ev domain.Evaluator) (domain.MutationDecision, error) {
+		return ev.EvaluateMutation(callCtx, scope, candidate, existing)
 	})
 }
 
 func (f *fallbackEvaluator) EvaluateMutations(ctx context.Context, scope string, candidates []string, existing []domain.Fact) ([]domain.MutationDecision, error) {
-	return runWithFallback(ctx, f, domain.TaskMutation, func(ev domain.Evaluator) ([]domain.MutationDecision, error) {
+	return runWithFallback(ctx, f, domain.TaskMutation, func(callCtx context.Context, ev domain.Evaluator) ([]domain.MutationDecision, error) {
 		if bm, ok := ev.(domain.BatchMutationEvaluator); ok {
-			return bm.EvaluateMutations(ctx, scope, candidates, existing)
+			return bm.EvaluateMutations(callCtx, scope, candidates, existing)
 		}
 		out := make([]domain.MutationDecision, len(candidates))
 		for i, c := range candidates {
-			dec, err := ev.EvaluateMutation(ctx, scope, c, existing)
+			dec, err := ev.EvaluateMutation(callCtx, scope, c, existing)
 			if err != nil {
 				return nil, err
 			}
@@ -214,55 +228,55 @@ func (f *fallbackEvaluator) EvaluateMutations(ctx context.Context, scope string,
 }
 
 func (f *fallbackEvaluator) VerifyPlan(ctx context.Context, proposedPlan string, rules []domain.Fact) ([]domain.PlanViolation, error) {
-	return runWithFallback(ctx, f, domain.TaskVerify, func(ev domain.Evaluator) ([]domain.PlanViolation, error) {
-		return ev.VerifyPlan(ctx, proposedPlan, rules)
+	return runWithFallback(ctx, f, domain.TaskVerify, func(callCtx context.Context, ev domain.Evaluator) ([]domain.PlanViolation, error) {
+		return ev.VerifyPlan(callCtx, proposedPlan, rules)
 	})
 }
 
 func (f *fallbackEvaluator) CalibrateConfidence(ctx context.Context, scope string, facts []domain.Fact) (map[int64]float64, error) {
-	return runWithFallback(ctx, f, domain.TaskCalibrate, func(ev domain.Evaluator) (map[int64]float64, error) {
+	return runWithFallback(ctx, f, domain.TaskCalibrate, func(callCtx context.Context, ev domain.Evaluator) (map[int64]float64, error) {
 		c, ok := ev.(domain.ConfidenceCalibrator)
 		if !ok {
 			return nil, fmt.Errorf("evaluator %s does not support confidence calibration", ev.Name())
 		}
-		return c.CalibrateConfidence(ctx, scope, facts)
+		return c.CalibrateConfidence(callCtx, scope, facts)
 	})
 }
 
 func (f *fallbackEvaluator) ConsolidateFacts(ctx context.Context, scope, category string, facts []domain.Fact) (string, error) {
-	return runWithFallback(ctx, f, domain.TaskConsolidate, func(ev domain.Evaluator) (string, error) {
+	return runWithFallback(ctx, f, domain.TaskConsolidate, func(callCtx context.Context, ev domain.Evaluator) (string, error) {
 		c, ok := ev.(domain.Consolidator)
 		if !ok {
 			return "", fmt.Errorf("evaluator %s does not support consolidation", ev.Name())
 		}
-		return c.ConsolidateFacts(ctx, scope, category, facts)
+		return c.ConsolidateFacts(callCtx, scope, category, facts)
 	})
 }
 
 func (f *fallbackEvaluator) SuggestConsolidations(ctx context.Context, scope string, facts []domain.Fact) ([]domain.ConsolidationProposal, error) {
-	return runWithFallback(ctx, f, domain.TaskConsolidate, func(ev domain.Evaluator) ([]domain.ConsolidationProposal, error) {
+	return runWithFallback(ctx, f, domain.TaskConsolidate, func(callCtx context.Context, ev domain.Evaluator) ([]domain.ConsolidationProposal, error) {
 		p, ok := ev.(domain.ConsolidationPlanner)
 		if !ok {
 			return nil, fmt.Errorf("evaluator %s does not support consolidation planning", ev.Name())
 		}
-		return p.SuggestConsolidations(ctx, scope, facts)
+		return p.SuggestConsolidations(callCtx, scope, facts)
 	})
 }
 
 func (f *fallbackEvaluator) SummarizeCommitProgress(ctx context.Context, scope, lang string, commits []domain.GitCommitBrief) ([]domain.CommitProgressItem, error) {
-	return runWithFallback(ctx, f, domain.TaskProgress, func(ev domain.Evaluator) ([]domain.CommitProgressItem, error) {
+	return runWithFallback(ctx, f, domain.TaskProgress, func(callCtx context.Context, ev domain.Evaluator) ([]domain.CommitProgressItem, error) {
 		p, ok := ev.(domain.ProgressCommitCategorizer)
 		if !ok {
 			return nil, fmt.Errorf("evaluator %s does not support progress categorization", ev.Name())
 		}
-		return p.SummarizeCommitProgress(ctx, scope, lang, commits)
+		return p.SummarizeCommitProgress(callCtx, scope, lang, commits)
 	})
 }
 
 func (f *fallbackEvaluator) SummarizeCommitMilestones(ctx context.Context, scope, lang string, commits []domain.GitCommitBrief) ([]domain.GitMilestoneSummary, error) {
-	return runWithFallback(ctx, f, domain.TaskProgress, func(ev domain.Evaluator) ([]domain.GitMilestoneSummary, error) {
+	return runWithFallback(ctx, f, domain.TaskProgress, func(callCtx context.Context, ev domain.Evaluator) ([]domain.GitMilestoneSummary, error) {
 		if p, ok := ev.(domain.ProgressMilestoneSummarizer); ok {
-			return p.SummarizeCommitMilestones(ctx, scope, lang, commits)
+			return p.SummarizeCommitMilestones(callCtx, scope, lang, commits)
 		}
 		if _, ok := ev.(domain.ProgressCommitCategorizer); ok {
 			return nil, nil
@@ -272,41 +286,41 @@ func (f *fallbackEvaluator) SummarizeCommitMilestones(ctx context.Context, scope
 }
 
 func (f *fallbackEvaluator) SuggestTaxonomyRebalance(ctx context.Context, scope string, facts []domain.Fact) ([]domain.TaxonomyRebalanceItem, error) {
-	return runWithFallback(ctx, f, domain.TaskTaxonomy, func(ev domain.Evaluator) ([]domain.TaxonomyRebalanceItem, error) {
+	return runWithFallback(ctx, f, domain.TaskTaxonomy, func(callCtx context.Context, ev domain.Evaluator) ([]domain.TaxonomyRebalanceItem, error) {
 		p, ok := ev.(domain.TaxonomyPlanner)
 		if !ok {
 			return nil, fmt.Errorf("evaluator %s does not support taxonomy rebalance", ev.Name())
 		}
-		return p.SuggestTaxonomyRebalance(ctx, scope, facts)
+		return p.SuggestTaxonomyRebalance(callCtx, scope, facts)
 	})
 }
 
 func (f *fallbackEvaluator) DraftRulePackProposal(ctx context.Context, scope, rawRuleText, sourceCat, sourceSub string, outline []domain.RuleOutlineEntry) (domain.RulePlacementProposal, error) {
-	return runWithFallback(ctx, f, domain.TaskConsolidate, func(ev domain.Evaluator) (domain.RulePlacementProposal, error) {
+	return runWithFallback(ctx, f, domain.TaskConsolidate, func(callCtx context.Context, ev domain.Evaluator) (domain.RulePlacementProposal, error) {
 		p, ok := ev.(domain.RulePackPlanner)
 		if !ok {
 			return domain.RulePlacementProposal{}, fmt.Errorf("evaluator %s does not support rule pack planning", ev.Name())
 		}
-		return p.DraftRulePackProposal(ctx, scope, rawRuleText, sourceCat, sourceSub, outline)
+		return p.DraftRulePackProposal(callCtx, scope, rawRuleText, sourceCat, sourceSub, outline)
 	})
 }
 
 func (f *fallbackEvaluator) FindRedundantLocalMemories(ctx context.Context, scope string, teamRules []domain.TeamRule, localFacts []domain.Fact) ([]domain.RuleDuplicateSuggestion, error) {
-	return runWithFallback(ctx, f, domain.TaskConsolidate, func(ev domain.Evaluator) ([]domain.RuleDuplicateSuggestion, error) {
+	return runWithFallback(ctx, f, domain.TaskConsolidate, func(callCtx context.Context, ev domain.Evaluator) ([]domain.RuleDuplicateSuggestion, error) {
 		p, ok := ev.(domain.RulePackPlanner)
 		if !ok {
 			return nil, fmt.Errorf("evaluator %s does not support rule pack duplicate analysis", ev.Name())
 		}
-		return p.FindRedundantLocalMemories(ctx, scope, teamRules, localFacts)
+		return p.FindRedundantLocalMemories(callCtx, scope, teamRules, localFacts)
 	})
 }
 
 func (f *fallbackEvaluator) SuggestGuardrailRefinements(ctx context.Context, scope string, items []domain.GuardrailRuleFriction) ([]domain.GuardrailRuleRefinement, error) {
-	return runWithFallback(ctx, f, domain.TaskConsolidate, func(ev domain.Evaluator) ([]domain.GuardrailRuleRefinement, error) {
+	return runWithFallback(ctx, f, domain.TaskConsolidate, func(callCtx context.Context, ev domain.Evaluator) ([]domain.GuardrailRuleRefinement, error) {
 		p, ok := ev.(domain.GuardrailRuleRefiner)
 		if !ok {
 			return nil, fmt.Errorf("evaluator %s does not support guardrail rule refinement", ev.Name())
 		}
-		return p.SuggestGuardrailRefinements(ctx, scope, items)
+		return p.SuggestGuardrailRefinements(callCtx, scope, items)
 	})
 }

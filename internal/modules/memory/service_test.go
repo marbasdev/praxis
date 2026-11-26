@@ -194,6 +194,49 @@ func TestSessionDeltaDeduplication(t *testing.T) {
 	if err != nil || !strings.Contains(t4, "Never use CGO") || !strings.Contains(t4, "Never run raw DDL in prod") {
 		t.Fatalf("Turn 4 refresh=true expected full memories, got:\n%s", t4)
 	}
+
+	t.Run("same_turn_task_caches_unmatched_candidates_across_preinvocation_steps", func(t *testing.T) {
+		probe := &chunkProbeEval{}
+		relSvc, err := memory.Open(":memory:", probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer relSvc.Close()
+
+		_, _ = relSvc.CommitMemory(ctx, "무관한 빌드 배포 메모", "", "project:relcache")
+		_, _ = relSvc.CommitMemory(ctx, "필수규칙: 항상 트랜잭션 사용", "", "project:relcache")
+
+		out1, err := relSvc.QuerySessionMemory(ctx, "sess-rel", "결제 API 수정", "", "project:relcache", false)
+		if err != nil || !strings.Contains(out1, "필수규칙") || probe.batchCalls.Load() != 1 || probe.scoredCount.Load() != 2 {
+			t.Fatalf("step 1 unexpected result: calls=%d scored=%d out=%q err=%v", probe.batchCalls.Load(), probe.scoredCount.Load(), out1, err)
+		}
+
+		// Repeat PreInvocation steps within the same turn (identical task) must skip re-scoring unmatched item #1.
+		for step := 2; step <= 4; step++ {
+			outRepeat, err := relSvc.QuerySessionMemory(ctx, "sess-rel", "결제 API 수정", "", "project:relcache", false)
+			if err != nil || !strings.HasPrefix(outRepeat, "No new memories") {
+				t.Fatalf("step %d expected No new memories, got %q (%v)", step, outRepeat, err)
+			}
+			if probe.batchCalls.Load() != 1 {
+				t.Fatalf("step %d expected 0 duplicate ScoreRelevance calls on unchanged task, got %d", step, probe.batchCalls.Load())
+			}
+		}
+
+		// Committing a new fact mid-turn evaluates ONLY the newly added candidate (#3).
+		_, _ = relSvc.CommitMemory(ctx, "추가된 무관 메모", "", "project:relcache")
+		_, err = relSvc.QuerySessionMemory(ctx, "sess-rel", "결제 API 수정", "", "project:relcache", false)
+		if err != nil || probe.batchCalls.Load() != 2 || probe.scoredCount.Load() != 3 {
+			t.Fatalf("expected mid-turn new fact to score only 1 delta item (calls=2, scored=3), got calls=%d scored=%d err=%v",
+				probe.batchCalls.Load(), probe.scoredCount.Load(), err)
+		}
+
+		// A new user prompt in the next turn re-evaluates the 2 unsent candidates.
+		_, err = relSvc.QuerySessionMemory(ctx, "sess-rel", "배포 파이프라인 점검", "", "project:relcache", false)
+		if err != nil || probe.batchCalls.Load() != 3 || probe.scoredCount.Load() != 5 {
+			t.Fatalf("expected new turn prompt to re-evaluate 2 unsent candidates (calls=3, scored=5), got calls=%d scored=%d err=%v",
+				probe.batchCalls.Load(), probe.scoredCount.Load(), err)
+		}
+	})
 }
 
 type chunkProbeEval struct {

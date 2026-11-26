@@ -197,6 +197,7 @@ type RecordPage struct {
 type ProbeResult struct {
 	Provider   string       `json:"provider"`
 	ElapsedMs  float64      `json:"elapsed_ms"`
+	TotalCount int          `json:"total_count"`
 	Thresholds Thresholds   `json:"thresholds"`
 	Pinned     []Fact       `json:"pinned"`
 	Scored     []ScoredFact `json:"scored"`

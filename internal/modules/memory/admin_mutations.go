@@ -17,6 +17,13 @@ func (s *Service) clearInMemorySessionIDs(ids ...int64) {
 			delete(seen, id)
 		}
 	}
+	for _, entry := range s.relCache {
+		if entry != nil {
+			for _, id := range ids {
+				delete(entry.checked, id)
+			}
+		}
+	}
 	s.mu.Unlock()
 }
 

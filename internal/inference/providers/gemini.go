@@ -27,13 +27,25 @@ var geminiQuotaFallbacks = []string{
 }
 
 var knownGeminiInputTokenLimits = map[string]int{
-	"gemini-decision-1":      262144,
-	"gemini-3.5-flash-lite":  1048576,
-	"gemini-3.1-flash-lite":  1048576,
-	"gemini-3.5-flash":       1048576,
-	"gemini-3.6-flash":       1048576,
-	"gemini-3.8-flash":       1048576,
-	"gemini-3.1-pro-preview": 1048576,
+	"gemini-decision-1":        262144,
+	"gemini-flash-lite-latest": 1048576,
+	"gemini-flash-latest":      1048576,
+	"gemini-pro-latest":        1048576,
+	"gemini-2.5-flash-lite":    1048576,
+	"gemini-2.5-flash":         1048576,
+	"gemini-3.5-flash-lite":    1048576,
+	"gemini-3.1-flash-lite":    1048576,
+	"gemini-3.5-flash":         1048576,
+	"gemini-3.6-flash":         1048576,
+	"gemini-3.8-flash":         1048576,
+	"gemini-3.1-pro-preview":   1048576,
+}
+
+func supportsGeminiZeroThinking(lowModel string) bool {
+	if lowModel == "" || strings.HasPrefix(lowModel, "gemini-1.") || strings.HasPrefix(lowModel, "gemini-2.0") || strings.Contains(lowModel, "-pro") {
+		return false
+	}
+	return strings.HasPrefix(lowModel, "gemini-")
 }
 
 var geminiMetaClient = &http.Client{Timeout: 500 * time.Millisecond}
@@ -80,14 +92,30 @@ func lookupGeminiInputTokenLimit(ctx context.Context, apiKey, model string, cach
 }
 
 type GeminiAdapter struct {
-	apiKey        string
-	model         string
-	noLogprobs    atomic.Bool
-	noThinking    atomic.Bool
-	ctxLimit      atomic.Int64
-	ctxProbed     atomic.Bool
-	cooldownMu    sync.Mutex
-	cooldownUntil map[string]time.Time
+	apiKey           string
+	model            string
+	noLogprobs       atomic.Bool
+	ctxLimit         atomic.Int64
+	ctxProbed        atomic.Bool
+	cooldownMu       sync.Mutex
+	cooldownUntil    map[string]time.Time
+	noThinkingModels map[string]bool
+}
+
+func (g *GeminiAdapter) isNoThinkingModel(lowModel string) bool {
+	g.cooldownMu.Lock()
+	disabled := g.noThinkingModels[lowModel]
+	g.cooldownMu.Unlock()
+	return disabled
+}
+
+func (g *GeminiAdapter) markNoThinkingModel(lowModel string) {
+	g.cooldownMu.Lock()
+	if g.noThinkingModels == nil {
+		g.noThinkingModels = make(map[string]bool)
+	}
+	g.noThinkingModels[lowModel] = true
+	g.cooldownMu.Unlock()
 }
 
 func (g *GeminiAdapter) InputTokenLimit(ctx context.Context) int {
@@ -209,7 +237,7 @@ func (g *GeminiAdapter) CallJSON(ctx context.Context, prompt string, schema map[
 	for idx, model := range candidates {
 		useLP := !g.noLogprobs.Load() && (os.Getenv("GEMINI_API_BASE") != "" || os.Getenv("GEMINI_ENABLE_LOGPROBS") == "1")
 		lowModel := strings.ToLower(strings.TrimSpace(model))
-		useZeroThink := !g.noThinking.Load() && (strings.Contains(lowModel, "gemini-2.5") || strings.Contains(lowModel, "gemini-3"))
+		useZeroThink := supportsGeminiZeroThinking(lowModel) && !g.isNoThinkingModel(lowModel)
 		var retryReason string
 
 		for attempt := 0; attempt < 3; attempt++ {
@@ -228,7 +256,7 @@ func (g *GeminiAdapter) CallJSON(ctx context.Context, prompt string, schema map[
 					continue
 				}
 				if err != nil && retryReason == "thinking" {
-					g.noThinking.Store(true)
+					g.markNoThinkingModel(lowModel)
 					useZeroThink = false
 					continue
 				}

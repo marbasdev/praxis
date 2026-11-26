@@ -254,6 +254,12 @@ func TestClientTurnBaselinesAndDiffSections(t *testing.T) {
 	if rem := config.ConsumeClientTurnDiffs(dataDir, sid, false); len(rem) != 0 {
 		t.Fatalf("expected cleared baselines, got %d", len(rem))
 	}
+
+	config.RecordClientTurnBaseline(dataDir, sid, "project:app", fileA, "main.go")
+	config.ClearClientTurnBaselines(dataDir, sid)
+	if rem := config.ConsumeClientTurnDiffs(dataDir, sid, false); len(rem) != 0 {
+		t.Fatalf("expected ClearClientTurnBaselines to wipe stale session baselines, got %d", len(rem))
+	}
 }
 
 func TestRemoteProfilesLookupAndRemove(t *testing.T) {

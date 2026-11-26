@@ -554,8 +554,8 @@ func (s *Service) ActiveTurnInput(ctx context.Context, sessionID, rawScope strin
 	cutoff := time.Now().Add(-domain.TurnInputTTL).Unix()
 	var lastInput string
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT last_input FROM turn_state WHERE session_id = ? AND scope = ? AND updated_at >= ?`,
-		sid, sc, cutoff).Scan(&lastInput); err != nil {
+		`SELECT last_input FROM turn_state WHERE session_id = ? AND last_input != '' AND updated_at >= ? ORDER BY updated_at DESC, CASE WHEN scope = ? THEN 0 ELSE 1 END ASC LIMIT 1`,
+		sid, cutoff, sc).Scan(&lastInput); err != nil {
 		return ""
 	}
 	return strings.TrimSpace(lastInput)
@@ -615,8 +615,13 @@ func (s *Service) ActiveTurnOverride(ctx context.Context, sessionID, rawScope, f
 	var lastInput, rawMutIDs string
 	var baseID int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT last_input, turn_base_id, mutated_ids FROM turn_state WHERE session_id = ? AND scope = ? AND updated_at >= ?`,
-		sid, sc, cutoff).Scan(&lastInput, &baseID, &rawMutIDs)
+		`SELECT last_input, turn_base_id, mutated_ids FROM turn_state WHERE session_id = ? AND last_input != '' AND updated_at >= ? ORDER BY updated_at DESC, CASE WHEN scope = ? THEN 0 ELSE 1 END ASC LIMIT 1`,
+		sid, cutoff, sc).Scan(&lastInput, &baseID, &rawMutIDs)
+	if err != nil {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT last_input, turn_base_id, mutated_ids FROM turn_state WHERE session_id = ? AND scope = ? AND updated_at >= ?`,
+			sid, sc, cutoff).Scan(&lastInput, &baseID, &rawMutIDs)
+	}
 	if err != nil {
 		fb := strings.TrimSpace(fallbackPrompt)
 		if fb != "" && len(fb) <= 1200 {

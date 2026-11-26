@@ -328,6 +328,27 @@ func TestCLIUserConnectAndThinClientEndToEnd(t *testing.T) {
 		t.Fatalf("expected client baseline cleared after passing Stop, got %d", len(rem))
 	}
 
+	_, _, _ = runHookViaRemote(domain.RemoteTargetConfig{URL: srv.URL, Token: aliceIssue.PlainToken}, cliDataDir, "antigravity-pretool", preJSON, time.Now())
+	if err := os.WriteFile(targetFile, []byte("package main\nfunc ok() { BAD_TEAM_TOKEN() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agyStopOut, _, _ := runHookViaRemote(domain.RemoteTargetConfig{URL: srv.URL, Token: aliceIssue.PlainToken}, cliDataDir, "antigravity-stop", stopJSON, time.Now())
+	if !strings.Contains(agyStopOut, `"decision":"continue"`) {
+		t.Fatalf("expected antigravity remote Stop to return continue decision, got %s", agyStopOut)
+	}
+	if rem := config.ConsumeClientTurnDiffs(cliDataDir, "cli-s1", false); len(rem) == 0 {
+		t.Fatalf("expected antigravity continue Stop to retain baseline for re-verify")
+	}
+	turnResetJSON, _ := json.Marshal(map[string]any{
+		"session_id":      "cli-s1",
+		"workspace_roots": []string{teamRepo},
+		"prompt":          "Start fresh turn",
+	})
+	_, _, _ = runHookViaRemote(domain.RemoteTargetConfig{URL: srv.URL, Token: aliceIssue.PlainToken}, cliDataDir, "antigravity-turn", turnResetJSON, time.Now())
+	if rem := config.ConsumeClientTurnDiffs(cliDataDir, "cli-s1", false); len(rem) != 0 {
+		t.Fatalf("expected new user turn to wipe stale remote client baselines, got %d", len(rem))
+	}
+
 	code, discOut := captureStdout(t, func() int {
 		return executeArgs([]string{"disconnect", "--repo", teamRepo, "--json"}, "test", RuntimeHooks{})
 	})

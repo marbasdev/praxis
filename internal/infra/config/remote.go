@@ -336,6 +336,12 @@ func clientTurnStatePath(dataDir, sessionID string) string {
 	return filepath.Join(dir, "client-turns", hex.EncodeToString(sum[:12])+".json")
 }
 
+func ClearClientTurnBaselines(dataDir, sessionID string) {
+	if p := clientTurnStatePath(dataDir, sessionID); p != "" {
+		_ = os.Remove(p)
+	}
+}
+
 func RecordClientTurnBaseline(dataDir, sessionID, scope, filePath, displayPath string) {
 	p := clientTurnStatePath(dataDir, sessionID)
 	if p == "" || strings.TrimSpace(filePath) == "" {

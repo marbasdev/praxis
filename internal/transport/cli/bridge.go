@@ -422,6 +422,7 @@ type hookInputPeek struct {
 	Cwd            string
 	WorkspacePaths []string
 	Scope          string
+	Prompt         string
 	ToolName       string
 	TargetPath     string
 	TranscriptPath string
@@ -430,7 +431,7 @@ type hookInputPeek struct {
 func peekHookInput(rawStdin []byte) hookInputPeek {
 	trimmed := strings.TrimSpace(string(rawStdin))
 	if !strings.HasPrefix(trimmed, "{") {
-		return hookInputPeek{}
+		return hookInputPeek{Prompt: trimmed}
 	}
 	var p struct {
 		SessionID           string         `json:"session_id"`
@@ -443,6 +444,9 @@ func peekHookInput(rawStdin []byte) hookInputPeek {
 		WorkspacePaths      []string       `json:"workspacePaths"`
 		WorkspaceRoots      []string       `json:"workspace_roots"`
 		Scope               string         `json:"scope"`
+		Prompt              string         `json:"prompt"`
+		UserPrompt          string         `json:"user_prompt"`
+		LastUserInput       string         `json:"lastUserInput"`
 		ToolName            string         `json:"tool_name"`
 		Tool                string         `json:"tool"`
 		ToolInput           map[string]any `json:"tool_input"`
@@ -474,6 +478,7 @@ func peekHookInput(rawStdin []byte) hookInputPeek {
 		Cwd:            domain.FirstNonEmpty(p.Cwd, p.Workspace),
 		WorkspacePaths: paths,
 		Scope:          strings.TrimSpace(p.Scope),
+		Prompt:         domain.FirstNonEmpty(p.Prompt, p.UserPrompt, p.LastUserInput),
 		ToolName:       toolName,
 		TargetPath:     domain.ExtractTargetFilePath(toolIn),
 		TranscriptPath: domain.FirstNonEmpty(p.TranscriptPath, p.TranscriptPathCamel),
@@ -559,8 +564,11 @@ func isStopBlockedOutput(out string, code int) bool {
 	}
 	var m map[string]any
 	if json.Unmarshal([]byte(trimmed), &m) == nil {
-		if dec, ok := m["decision"].(string); ok && strings.EqualFold(strings.TrimSpace(dec), "block") {
-			return true
+		if dec, ok := m["decision"].(string); ok {
+			d := strings.TrimSpace(dec)
+			if strings.EqualFold(d, "block") || strings.EqualFold(d, "continue") {
+				return true
+			}
 		}
 		if cont, ok := m["continue"].(bool); ok && !cont {
 			return true
@@ -624,36 +632,93 @@ func buildClientHookContext(ctx context.Context, remote domain.RemoteTargetConfi
 	primaryScope := cc.CanonicalScopes[0]
 	targetScope := primaryScope
 	targetRepo := repoByScope[primaryScope]
+	targetRoot := targetRepo
+	cwd := domain.FirstNonEmpty(peek.Cwd, fallbackCwd)
 	targetAbs := ""
 	if peek.TargetPath != "" {
 		tp := peek.TargetPath
-		cwd := domain.FirstNonEmpty(peek.Cwd, fallbackCwd)
-		if !filepath.IsAbs(tp) && cwd != "" {
-			tp = filepath.Join(cwd, tp)
+		if !filepath.IsAbs(tp) {
+			if base := domain.FirstNonEmpty(cwd, targetRoot, targetRepo); base != "" {
+				tp = filepath.Join(base, tp)
+			}
 		}
 		targetAbs = filepath.Clean(tp)
-		matched := false
-		for sc, root := range repoByScope {
-			if root == "" {
-				continue
+		if sc, root := git.CanonicalScope(ctx, filepath.Dir(targetAbs)); sc != "" {
+			targetScope = sc
+			targetRepo = root
+			targetRoot = root
+		} else {
+			var refRoots []string
+			for _, wp := range peek.WorkspacePaths {
+				if p := parseLocalRootPath(wp); p != "" {
+					refRoots = append(refRoots, filepath.Clean(p))
+				}
 			}
-			cleanRoot := filepath.Clean(root)
-			if targetAbs == cleanRoot || strings.HasPrefix(targetAbs, cleanRoot+string(filepath.Separator)) {
-				targetScope = sc
-				targetRepo = root
-				matched = true
-				break
+			if cwd != "" {
+				refRoots = append(refRoots, filepath.Clean(cwd))
+			}
+			matched := false
+			for _, ref := range refRoots {
+				if targetAbs == ref || strings.HasPrefix(targetAbs, ref+string(filepath.Separator)) {
+					if peek.Scope != "" && targetRoot != "" && filepath.Clean(targetRoot) == ref {
+						matched = true
+						break
+					}
+					if sc, root := resolveClientScopeAndRoot(ctx, ref); sc != "" {
+						targetScope = sc
+						targetRepo = root
+						targetRoot = ref
+						matched = true
+						break
+					}
+				}
+			}
+			if !matched {
+				home, _ := os.UserHomeDir()
+				cleanHome := filepath.Clean(home)
+				for _, ref := range refRoots {
+					if ref == cleanHome {
+						continue
+					}
+					parent := filepath.Dir(ref)
+					if parent == "." || parent == ref || parent == filepath.Dir(parent) || filepath.VolumeName(parent) == parent {
+						continue
+					}
+					rel, err := filepath.Rel(parent, targetAbs)
+					if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+						continue
+					}
+					slashed := filepath.ToSlash(rel)
+					if !strings.Contains(slashed, "/") {
+						continue
+					}
+					seg := strings.SplitN(slashed, "/", 2)[0]
+					if base := strings.ToLower(domain.CanonicalPathBase(seg)); base != "" {
+						targetScope = "project:" + base
+						targetRepo = ""
+						targetRoot = filepath.Join(parent, seg)
+						break
+					}
+				}
 			}
 		}
-		if !matched {
-			if sc, root := resolveClientScopeAndRoot(ctx, filepath.Dir(targetAbs)); sc != "" {
-				targetScope = sc
-				targetRepo = root
-			}
-		}
-		if targetRepo != "" {
-			if rel, err := filepath.Rel(targetRepo, targetAbs); err == nil && !strings.HasPrefix(rel, "..") {
-				cc.TargetRelPath = filepath.ToSlash(rel)
+		if targetRoot != "" {
+			if rel, err := filepath.Rel(targetRoot, targetAbs); err == nil && !strings.HasPrefix(rel, "..") {
+				slashed := filepath.ToSlash(rel)
+				cleanRoot := filepath.Clean(targetRoot)
+				needPrefix := len(cc.CanonicalScopes) > 1 || targetScope != primaryScope
+				if !needPrefix && cwd != "" {
+					cleanCwd := filepath.Clean(cwd)
+					if cleanCwd != cleanRoot && !strings.HasPrefix(cleanCwd, cleanRoot+string(filepath.Separator)) {
+						needPrefix = true
+					}
+				}
+				if needPrefix {
+					if base := filepath.Base(cleanRoot); base != "" && base != "." && base != string(filepath.Separator) {
+						slashed = base + "/" + slashed
+					}
+				}
+				cc.TargetRelPath = slashed
 			}
 		}
 		if cc.TargetRelPath == "" {
@@ -708,8 +773,14 @@ func buildClientHookContext(ctx context.Context, remote domain.RemoteTargetConfi
 		}
 	}
 
-	effSID := effectiveClientHookSessionID(peek.SessionID, targetScope)
+	effSID := effectiveClientHookSessionID(peek.SessionID, primaryScope)
 	switch phase {
+	case domain.HookPhaseSessionStart:
+		config.ClearClientTurnBaselines(dataDir, effSID)
+	case domain.HookPhaseTurn:
+		if strings.TrimSpace(peek.Prompt) != "" {
+			config.ClearClientTurnBaselines(dataDir, effSID)
+		}
 	case domain.HookPhasePreTool:
 		if domain.IsFileEditTool(peek.ToolName) && targetAbs != "" {
 			dispPath := clientHookDisplayPath(targetAbs, cc.TargetRelPath)

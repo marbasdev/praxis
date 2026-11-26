@@ -1025,3 +1025,195 @@ func TestStopReverifyCapYieldsAndWarnsNextTurn(t *testing.T) {
 		t.Fatalf("expected next turn to receive unresolved Stop retry cap warning, got %q", turnOut)
 	}
 }
+
+func TestStopMultiRepoCleanupScopeGroupingDedupAndFilePinpoint(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("non_git_sibling_subpaths_group_by_root_and_skip_decommissioned_dir", func(t *testing.T) {
+		eval := &contextAwareVerifyEval{
+			violateSubstr: "Removed:",
+			stubEval: stubEval{
+				dec: domain.MutationDecision{
+					Category:    "testing",
+					Tier:        "rule",
+					IsPermanent: 0.95,
+					Action:      "INSERT",
+					Confidence:  0.95,
+				},
+			},
+		}
+		st := newTestStack(t, ":memory:", eval)
+		if _, err := st.mem.CommitMemory(ctx, "Never delete tests to bypass verification", "testing", "global"); err != nil {
+			t.Fatal(err)
+		}
+		eval.dec = domain.MutationDecision{Action: "IGNORE"}
+
+		parent := t.TempDir()
+		wsSkill := filepath.Join(parent, "ignite-skill")
+		protoSrv := filepath.Join(parent, "outgame-server")
+		if err := os.MkdirAll(wsSkill, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		specFile := filepath.Join(protoSrv, "test", "contract", "proto.spec.ts")
+		rpcFile := filepath.Join(protoSrv, "src", "shared", "rpc", "sync.ts")
+		if err := os.MkdirAll(filepath.Dir(specFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(rpcFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(specFile, []byte("describe('proto', () => {})\n"), 0o600)
+		_ = os.WriteFile(rpcFile, []byte("export const sync = 1;\n"), 0o600)
+
+		for _, f := range []string{specFile, rpcFile} {
+			pre, _ := json.Marshal(map[string]any{
+				"conversationId": "sess-decomm",
+				"workspacePaths": []string{wsSkill},
+				"toolCall":       map[string]any{"name": "edit_file", "args": map[string]any{"Path": f}},
+			})
+			_, _, _ = st.gr.ExecuteHook(ctx, "antigravity-pretool", pre, wsSkill)
+		}
+
+		edits, err := st.gr.loadPendingTurnEdits(ctx, "sess-decomm")
+		if err != nil || len(edits) != 2 {
+			t.Fatalf("expected 2 pending edits, got len=%d err=%v", len(edits), err)
+		}
+		for _, e := range edits {
+			if e.Scope != "project:outgame-server" {
+				t.Fatalf("expected non-git sibling subpaths grouped under project:outgame-server, got %q for %s", e.Scope, e.FilePath)
+			}
+		}
+
+		// Decommissioning the entire prototype root must not report piecemeal test deletions.
+		if err := os.RemoveAll(protoSrv); err != nil {
+			t.Fatal(err)
+		}
+		stopPayload, _ := json.Marshal(map[string]any{
+			"conversationId":    "sess-decomm",
+			"workspacePaths":    []string{wsSkill},
+			"terminationReason": "NO_TOOL_CALL",
+		})
+		out, code, err := st.gr.ExecuteHook(ctx, "antigravity-stop", stopPayload, wsSkill)
+		if err != nil || code != 0 || out != "{}" {
+			t.Fatalf("expected decommissioned root directory to pass without false deletion block, got code=%d out=%s err=%v", code, out, err)
+		}
+
+		// Explicit scope on non-Git workspace must be preserved instead of overwritten by folder basename.
+		explicitPre, _ := json.Marshal(map[string]any{
+			"session_id": "sess-explicit-scope",
+			"scope":      "project:custom-explicit",
+			"cwd":        wsSkill,
+			"tool_name":  "Edit",
+			"tool_input": map[string]any{"file_path": filepath.Join(wsSkill, "sub", "item.ts")},
+		})
+		_, _, _ = st.gr.ExecuteHook(ctx, "claude-pretool", explicitPre, wsSkill)
+		expEdits, err := st.gr.loadPendingTurnEdits(ctx, "sess-explicit-scope")
+		if err != nil || len(expEdits) != 1 || expEdits[0].Scope != "project:custom-explicit" {
+			t.Fatalf("expected explicit ev.Scope preserved for non-Git file edit, got %+v (err=%v)", expEdits, err)
+		}
+	})
+
+	t.Run("new_turn_wipes_cross_scope_zombie_edits_and_pinpoints_capped_files", func(t *testing.T) {
+		eval := &contextAwareVerifyEval{
+			violateSubstr: "FORBIDDEN_GLOBAL_CALL",
+			stubEval: stubEval{
+				dec: domain.MutationDecision{
+					Category:    "testing",
+					Tier:        "rule",
+					IsPermanent: 0.95,
+					Action:      "INSERT",
+					Confidence:  0.95,
+				},
+			},
+		}
+		st := newTestStack(t, ":memory:", eval)
+		if _, err := st.mem.CommitMemory(ctx, "Never call FORBIDDEN_GLOBAL_CALL", "testing", "global"); err != nil {
+			t.Fatal(err)
+		}
+		eval.dec = domain.MutationDecision{Action: "IGNORE"}
+
+		parent := t.TempDir()
+		repoZombie := filepath.Join(parent, "zombie-repo")
+		repoA := filepath.Join(parent, "alpha-srv")
+		repoB := filepath.Join(parent, "beta-srv")
+		for _, d := range []string{repoZombie, repoA, repoB} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Turn 1: edit zombie-repo with empty prompt in PreToolUse and never invoke Stop (simulating timeout).
+		zombieFile := filepath.Join(repoZombie, "stale.go")
+		_ = os.WriteFile(zombieFile, []byte("package z\n"), 0o600)
+		preZombie, _ := json.Marshal(map[string]any{
+			"session_id": "sess-multi",
+			"cwd":        repoA,
+			"tool_name":  "Edit",
+			"tool_input": map[string]any{"file_path": zombieFile},
+		})
+		_, _, _ = st.gr.ExecuteHook(ctx, "claude-pretool", preZombie, repoA)
+		_ = os.WriteFile(zombieFile, []byte("package z\nfunc z() { FORBIDDEN_GLOBAL_CALL() }\n"), 0o600)
+
+		// Turn 2 starts on repoA: must purge zombie-repo pending edit across scopes.
+		turn2, _ := json.Marshal(map[string]any{
+			"session_id": "sess-multi",
+			"cwd":        repoA,
+			"prompt":     "Implement multi-repo feature",
+		})
+		_, _, _ = st.gr.ExecuteHook(ctx, "claude-turn", turn2, repoA)
+
+		// Edit a large clean file in repoA (fills its own chunk) + 9 violating files in repoA + 1 violating file in repoB.
+		cleanPad := filepath.Join(repoA, "clean_large.go")
+		_ = os.WriteFile(cleanPad, []byte("package a\n"), 0o600)
+		preClean, _ := json.Marshal(map[string]any{
+			"session_id": "sess-multi",
+			"cwd":        repoA,
+			"tool_name":  "Edit",
+			"tool_input": map[string]any{"file_path": cleanPad},
+		})
+		_, _, _ = st.gr.ExecuteHook(ctx, "claude-pretool", preClean, repoA)
+		_ = os.WriteFile(cleanPad, []byte("package a\n"+strings.Repeat("func cleanLine() int { return 42 }\n", 110)), 0o600)
+
+		for i := 1; i <= 9; i++ {
+			f := filepath.Join(repoA, fmt.Sprintf("bad_%02d.go", i))
+			_ = os.WriteFile(f, []byte("package a\n"), 0o600)
+			pre, _ := json.Marshal(map[string]any{
+				"session_id": "sess-multi",
+				"cwd":        repoA,
+				"tool_name":  "Edit",
+				"tool_input": map[string]any{"file_path": f},
+			})
+			_, _, _ = st.gr.ExecuteHook(ctx, "claude-pretool", pre, repoA)
+			_ = os.WriteFile(f, []byte("package a\nfunc bad() { FORBIDDEN_GLOBAL_CALL() }\n"), 0o600)
+		}
+
+		fB := filepath.Join(repoB, "bad_beta.go")
+		_ = os.WriteFile(fB, []byte("package b\n"), 0o600)
+		preB, _ := json.Marshal(map[string]any{
+			"session_id": "sess-multi",
+			"cwd":        repoA,
+			"tool_name":  "Edit",
+			"tool_input": map[string]any{"file_path": fB},
+		})
+		_, _, _ = st.gr.ExecuteHook(ctx, "claude-pretool", preB, repoA)
+		_ = os.WriteFile(fB, []byte("package b\nfunc badB() { FORBIDDEN_GLOBAL_CALL() }\n"), 0o600)
+
+		stop2, _ := json.Marshal(map[string]any{"session_id": "sess-multi", "cwd": repoA})
+		stopOut, stopCode, err := st.gr.ExecuteHook(ctx, "claude-stop", stop2, repoA)
+		if err != nil || stopCode != 0 {
+			t.Fatalf("unexpected stop error: code=%d err=%v", stopCode, err)
+		}
+		if strings.Contains(stopOut, "zombie-repo") || strings.Contains(stopOut, "stale.go") {
+			t.Fatalf("expected Turn 1 cross-scope zombie edit to be purged on Turn 2 start, got:\n%s", stopOut)
+		}
+		if strings.Contains(stopOut, "clean_large.go") {
+			t.Fatalf("expected non-violating chunk file clean_large.go excluded from Touched files, got:\n%s", stopOut)
+		}
+		if cnt := strings.Count(stopOut, "Never call FORBIDDEN_GLOBAL_CALL"); cnt != 1 {
+			t.Fatalf("expected global rule violation deduplicated to 1 line across scopes, got %d in:\n%s", cnt, stopOut)
+		}
+		if !strings.Contains(stopOut, "alpha-srv/bad_01.go") || !strings.Contains(stopOut, "(+2 more)") {
+			t.Fatalf("expected repo-prefixed violating files capped at 8 with (+2 more), got:\n%s", stopOut)
+		}
+	})
+}

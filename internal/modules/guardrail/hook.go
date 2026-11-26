@@ -15,6 +15,13 @@ import (
 type hookWorkspaceTarget struct {
 	Scope   string
 	RepoDir string
+	RootDir string
+}
+
+func isValidProjectDir(dir string) bool {
+	clean := filepath.Clean(dir)
+	home, _ := os.UserHomeDir()
+	return clean != "." && clean != filepath.Dir(clean) && filepath.VolumeName(clean) != clean && clean != filepath.Clean(home)
 }
 
 func scopeAndRepoFromPath(rawPath string) (string, string) {
@@ -29,10 +36,8 @@ func scopeAndRepoFromPath(rawPath string) (string, string) {
 	if sc, repoDir := git.CanonicalScope(context.Background(), dir); sc != "" {
 		return sc, repoDir
 	}
-	clean := filepath.Clean(dir)
-	home, _ := os.UserHomeDir()
-	if clean != "." && clean != filepath.Dir(clean) && filepath.VolumeName(clean) != clean && clean != filepath.Clean(home) {
-		base := strings.ToLower(domain.CanonicalPathBase(p))
+	if isValidProjectDir(dir) {
+		base := strings.ToLower(domain.CanonicalPathBase(dir))
 		if base != "" {
 			return "project:" + base, ""
 		}
@@ -66,16 +71,23 @@ func resolveHookWorkspaces(ctx context.Context, ev NormalizedHookEvent, fallback
 	if ev.Scope != "" {
 		sc := domain.NormalizeScope(ev.Scope)
 		cwd := domain.FirstNonEmpty(ev.Cwd, fallbackCwd)
-		if cwd == "" && len(ev.Raw.WorkspacePaths) > 0 {
+		if len(ev.Raw.WorkspacePaths) > 0 {
 			for _, wp := range ev.Raw.WorkspacePaths {
 				wsc, wrepo := scopeAndRepoFromPath(wp)
 				if wsc == sc {
-					return []hookWorkspaceTarget{{Scope: sc, RepoDir: wrepo}}, resolveHookSessionID(ctx, ev, sc)
+					return []hookWorkspaceTarget{{Scope: sc, RepoDir: wrepo, RootDir: domain.FirstNonEmpty(wrepo, filepath.Clean(wp))}}, resolveHookSessionID(ctx, ev, sc)
 				}
 			}
-			cwd = ev.Raw.WorkspacePaths[0]
+			if cwd == "" {
+				cwd = ev.Raw.WorkspacePaths[0]
+			}
 		}
-		return []hookWorkspaceTarget{{Scope: sc, RepoDir: git.ResolveRoot(cwd)}}, resolveHookSessionID(ctx, ev, sc)
+		repo := git.ResolveRoot(cwd)
+		root := repo
+		if root == "" && cwd != "" && isValidProjectDir(cwd) {
+			root = filepath.Clean(cwd)
+		}
+		return []hookWorkspaceTarget{{Scope: sc, RepoDir: repo, RootDir: root}}, resolveHookSessionID(ctx, ev, sc)
 	}
 
 	seen := make(map[string]bool)
@@ -86,7 +98,11 @@ func resolveHookWorkspaces(ctx context.Context, ev NormalizedHookEvent, fallback
 			return
 		}
 		seen[sc] = true
-		targets = append(targets, hookWorkspaceTarget{Scope: sc, RepoDir: repo})
+		root := repo
+		if root == "" && isValidProjectDir(raw) {
+			root = filepath.Clean(raw)
+		}
+		targets = append(targets, hookWorkspaceTarget{Scope: sc, RepoDir: repo, RootDir: root})
 	}
 
 	for _, wp := range ev.Raw.WorkspacePaths {
@@ -109,25 +125,89 @@ func resolveHookWorkspaces(ctx context.Context, ev NormalizedHookEvent, fallback
 	return targets, resolveHookSessionID(ctx, ev, targets[0].Scope)
 }
 
-func resolveGuardrailTarget(ev NormalizedHookEvent, targets []hookWorkspaceTarget) hookWorkspaceTarget {
+func resolveGuardrailTarget(ctx context.Context, ev NormalizedHookEvent, targets []hookWorkspaceTarget, fallbackCwd string) hookWorkspaceTarget {
 	if ev.ClientCtx != nil && strings.TrimSpace(ev.ClientCtx.TargetScope) != "" {
 		return hookWorkspaceTarget{Scope: domain.NormalizeScope(ev.ClientCtx.TargetScope)}
 	}
-	if ev.TargetPath != "" {
-		cleanTool := filepath.Clean(ev.TargetPath)
-		for _, wp := range ev.Raw.WorkspacePaths {
-			cleanWP := filepath.Clean(wp)
-			if cleanTool == cleanWP || strings.HasPrefix(cleanTool, cleanWP+string(filepath.Separator)) {
-				if sc, repo := scopeAndRepoFromPath(cleanWP); sc != "" {
-					return hookWorkspaceTarget{Scope: sc, RepoDir: repo}
-				}
-			}
+	fallback := targets[0]
+	cwd := domain.FirstNonEmpty(ev.Cwd, fallbackCwd)
+	cleanTool := resolveCanonicalToolPath(ev.TargetPath, domain.FirstNonEmpty(fallback.RootDir, fallback.RepoDir), cwd)
+	if cleanTool == "" {
+		return fallback
+	}
+	if ev.Scope != "" {
+		fbRoot := domain.FirstNonEmpty(fallback.RootDir, fallback.RepoDir)
+		if fbRoot == "" {
+			return fallback
 		}
-		if sc, repo := scopeAndRepoFromPath(filepath.Dir(cleanTool)); sc != "" {
-			return hookWorkspaceTarget{Scope: sc, RepoDir: repo}
+		cleanFB := filepath.Clean(fbRoot)
+		if cleanTool == cleanFB || strings.HasPrefix(cleanTool, cleanFB+string(filepath.Separator)) {
+			return fallback
 		}
 	}
-	return targets[0]
+	if sc, repo := git.CanonicalScope(ctx, filepath.Dir(cleanTool)); sc != "" {
+		return hookWorkspaceTarget{Scope: sc, RepoDir: repo, RootDir: repo}
+	}
+
+	type refEntry struct {
+		dir    string
+		preset *hookWorkspaceTarget
+	}
+	var refRoots []refEntry
+	seenRef := make(map[string]bool)
+	addRef := func(raw string, preset *hookWorkspaceTarget) {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || !isValidProjectDir(trimmed) {
+			return
+		}
+		c := filepath.Clean(trimmed)
+		if !seenRef[c] {
+			seenRef[c] = true
+			refRoots = append(refRoots, refEntry{dir: c, preset: preset})
+		}
+	}
+	for i := range targets {
+		t := targets[i]
+		addRef(domain.FirstNonEmpty(t.RootDir, t.RepoDir), &t)
+	}
+	for _, wp := range ev.Raw.WorkspacePaths {
+		addRef(wp, nil)
+	}
+	addRef(cwd, nil)
+
+	for _, entry := range refRoots {
+		cleanWP := entry.dir
+		if cleanTool == cleanWP || strings.HasPrefix(cleanTool, cleanWP+string(filepath.Separator)) {
+			if entry.preset != nil && entry.preset.Scope != "" {
+				return *entry.preset
+			}
+			if sc, repo := scopeAndRepoFromPath(cleanWP); sc != "" {
+				return hookWorkspaceTarget{Scope: sc, RepoDir: repo, RootDir: domain.FirstNonEmpty(repo, cleanWP)}
+			}
+		}
+	}
+
+	for _, entry := range refRoots {
+		cleanWP := entry.dir
+		parent := filepath.Dir(cleanWP)
+		if parent == "." || parent == cleanWP || parent == filepath.Dir(parent) || filepath.VolumeName(parent) == parent {
+			continue
+		}
+		rel, err := filepath.Rel(parent, cleanTool)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		slashed := filepath.ToSlash(rel)
+		if !strings.Contains(slashed, "/") {
+			continue
+		}
+		seg := strings.SplitN(slashed, "/", 2)[0]
+		if base := strings.ToLower(domain.CanonicalPathBase(seg)); base != "" {
+			sibRoot := filepath.Join(parent, seg)
+			return hookWorkspaceTarget{Scope: "project:" + base, RootDir: sibRoot}
+		}
+	}
+	return fallback
 }
 
 type teamRuleDocIngester interface {
@@ -161,8 +241,8 @@ func (s *Service) ExecuteHook(ctx context.Context, mode string, rawStdin []byte,
 	case domain.HookPhaseSessionStart, domain.HookPhaseTurn:
 		return s.runContextHook(ctx, ev, codec, targets, sid)
 	case domain.HookPhasePreTool, domain.HookPhasePreCommit:
-		target := resolveGuardrailTarget(ev, targets)
-		return s.runGuardrailHook(ctx, ev, codec, target.Scope, target.RepoDir, sid)
+		target := resolveGuardrailTarget(ctx, ev, targets, fallbackCwd)
+		return s.runGuardrailHook(ctx, ev, codec, target.Scope, target.RepoDir, target.RootDir, sid)
 	case domain.HookPhaseStop:
 		return s.runStopHook(ctx, ev, codec, sid, fallbackCwd)
 	case domain.HookPhaseSessionEnd:
@@ -185,6 +265,12 @@ func (s *Service) runContextHook(ctx context.Context, ev NormalizedHookEvent, co
 
 	ctx, combinedTask, compacted := s.prepareContextTurn(ctx, ev, sid, isStart)
 	refreshSession := isStart || compacted
+	if isStart {
+		s.clearPendingTurnEdits(ctx, sid)
+		s.mem.ClearTurnStopRetries(ctx, sid)
+	} else if strings.TrimSpace(ev.Prompt) != "" {
+		s.clearPreviousTurnEdits(ctx, sid, ev.Prompt)
+	}
 
 	engineReady, readinessReason := s.CheckEngineReadiness(ctx)
 	setupMsg := ""
@@ -249,7 +335,6 @@ func (s *Service) collectTargetContext(
 	if explicitSID != "" {
 		if !isStart && rawUserPrompt != "" {
 			s.mem.RecordTurnState(localCtx, explicitSID, t.Scope, rawUserPrompt)
-			s.clearStalePendingTurnEdits(localCtx, explicitSID, t.Scope, rawUserPrompt)
 		} else {
 			s.mem.TouchTurnSession(localCtx, explicitSID, t.Scope)
 		}
@@ -328,7 +413,7 @@ func (s *Service) checkTurnPreMutateGate(ctx context.Context, ev NormalizedHookE
 	}
 	cand := s.mem.ConsumeTurnPreMutateCandidate(ctx, ev.SessionID, scope, ev.Prompt)
 	if cand != "" {
-		s.clearStalePendingTurnEdits(ctx, ev.SessionID, scope, cand)
+		s.clearStalePendingTurnEdits(ctx, ev.SessionID, cand)
 	}
 	runes := []rune(cand)
 	if len(runes) < 6 || len(runes) > 1200 {

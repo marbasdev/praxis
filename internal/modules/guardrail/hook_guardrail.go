@@ -31,7 +31,7 @@ func (s *Service) rememberRepo(ctx context.Context, scope, repoDir string) {
 	}
 }
 
-func (s *Service) runGuardrailHook(ctx context.Context, ev NormalizedHookEvent, codec AgentCodec, scope, repoDir, sid string) (string, int, error) {
+func (s *Service) runGuardrailHook(ctx context.Context, ev NormalizedHookEvent, codec AgentCodec, scope, repoDir, rootDir, sid string) (string, int, error) {
 	s.rememberRepo(ctx, scope, repoDir)
 	if s.rp != nil && strings.HasPrefix(scope, "project:") {
 		_, _ = s.rp.SyncTurnNotice(ctx, scope, repoDir)
@@ -93,7 +93,7 @@ func (s *Service) runGuardrailHook(ctx context.Context, ev NormalizedHookEvent, 
 
 	if ev.Phase == domain.HookPhasePreTool && strings.TrimSpace(ev.Raw.ProposedPlan) == "" && domain.IsFileEditTool(toolName) {
 		if ev.ClientCtx == nil || !ev.ClientCtx.RemoteManagedEdit {
-			s.recordPendingTurnEdit(ctx, sid, scope, repoDir, toolName, ev, plan)
+			s.recordPendingTurnEdit(ctx, sid, scope, domain.FirstNonEmpty(rootDir, repoDir), toolName, ev, plan)
 		}
 		return codec.FormatAllowPreTool()
 	}

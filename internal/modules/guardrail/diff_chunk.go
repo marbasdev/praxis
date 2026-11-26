@@ -35,6 +35,7 @@ type chunkedVerifyOutcome struct {
 	TotalChunks          int
 	EvaluatedChunks      int
 	Blocking             []domain.PlanViolation
+	ViolatingFiles       []string
 	HasPersonalViolation bool
 	Partial              bool
 	UnverifiedFiles      []string
@@ -344,6 +345,7 @@ func (s *Service) evaluateGuardrailPlanChunks(
 
 	flaggedByID := make(map[int64]domain.PlanViolation)
 	chunkFlagged := make(map[int][]domain.Fact)
+	chunkRuleIDs := make(map[int]map[int64]bool)
 
 	for i, ch := range chunks {
 		if enforceDeadline && i > 0 {
@@ -378,8 +380,10 @@ func (s *Service) evaluateGuardrailPlanChunks(
 		blocking := filterAndSortViolations(viols, minProb)
 		if len(blocking) > 0 {
 			chunkRules := make([]domain.Fact, 0, len(blocking))
+			idsInChunk := make(map[int64]bool, len(blocking))
 			for _, b := range blocking {
 				chunkRules = append(chunkRules, b.Fact)
+				idsInChunk[b.ID] = true
 				if prev, ok := flaggedByID[b.ID]; !ok || b.Probability > prev.Probability || (prev.RequiresConfirm && !b.RequiresConfirm) {
 					if ok && !prev.RequiresConfirm {
 						b.RequiresConfirm = false
@@ -388,6 +392,7 @@ func (s *Service) evaluateGuardrailPlanChunks(
 				}
 			}
 			chunkFlagged[i] = chunkRules
+			chunkRuleIDs[i] = idsInChunk
 		}
 	}
 
@@ -407,6 +412,7 @@ func (s *Service) evaluateGuardrailPlanChunks(
 	if ovCtx.PromptContext != "" {
 		if dl, ok := ctx.Deadline(); !ok || time.Until(dl) >= 1200*time.Millisecond {
 			ovByID := make(map[int64]domain.PlanViolation)
+			ovChunkRuleIDs := make(map[int]map[int64]bool)
 			ovAllOK := true
 
 			chunkIndices := make([]int, 0, len(chunkFlagged))
@@ -421,6 +427,10 @@ func (s *Service) evaluateGuardrailPlanChunks(
 					if ovCtx.IsRuleMutatedInTurn(f) {
 						if orig, ok := flaggedByID[f.ID]; ok {
 							ovByID[f.ID] = orig
+							if ovChunkRuleIDs[idx] == nil {
+								ovChunkRuleIDs[idx] = make(map[int64]bool)
+							}
+							ovChunkRuleIDs[idx][f.ID] = true
 						}
 						continue
 					}
@@ -445,6 +455,10 @@ func (s *Service) evaluateGuardrailPlanChunks(
 					if orig, ok := flaggedByID[b.ID]; ok {
 						b.RequiresConfirm = orig.RequiresConfirm
 					}
+					if ovChunkRuleIDs[idx] == nil {
+						ovChunkRuleIDs[idx] = make(map[int64]bool)
+					}
+					ovChunkRuleIDs[idx][b.ID] = true
 					if prev, ok := ovByID[b.ID]; !ok || b.Probability > prev.Probability || (prev.RequiresConfirm && !b.RequiresConfirm) {
 						if ok && !prev.RequiresConfirm {
 							b.RequiresConfirm = false
@@ -455,15 +469,35 @@ func (s *Service) evaluateGuardrailPlanChunks(
 			}
 			if ovAllOK {
 				flaggedByID = ovByID
+				chunkRuleIDs = ovChunkRuleIDs
 			}
 		}
 	}
 
 	merged := make([]domain.PlanViolation, 0, len(flaggedByID))
+	survivingIDs := make(map[int64]bool, len(flaggedByID))
 	for _, v := range flaggedByID {
 		merged = append(merged, v)
+		survivingIDs[v.ID] = true
 	}
 	out.Blocking = filterAndSortViolations(merged, minProb)
+	if len(out.Blocking) > 0 {
+		seenFiles := make(map[string]bool)
+		for i, ch := range chunks {
+			matched := false
+			for id := range chunkRuleIDs[i] {
+				if survivingIDs[id] {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				for _, lbl := range ch.Labels {
+					out.ViolatingFiles = appendUniqueLabel(out.ViolatingFiles, seenFiles, lbl)
+				}
+			}
+		}
+	}
 	for _, v := range out.Blocking {
 		if domain.IsUserPrivateScope(ctx, v.Scope) {
 			out.HasPersonalViolation = true

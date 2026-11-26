@@ -82,7 +82,7 @@ flowchart LR
 | `LOCAL_MODEL_URL` / `LOCAL_MODEL_NAME` | `http://127.0.0.1:11434/v1` / *(auto)* | OpenAI-compatible local/gateway endpoint (`Ollama`, `vLLM`, `LiteLLM`, `OpenRouter`; `LOCAL_API_KEY` optional) |
 | `JEV_API_URL` / `JEV_MODEL` | `http://127.0.0.1:8000` / `jev-latest` | System 1 judgment endpoint and model (`TYPESAFE_API_KEY` optional) |
 | `PRAXIS_REMOTE_URL` / `PRAXIS_REMOTE_TOKEN` | *(empty)* | Explicit Team Server URL and Bearer token override (supersedes `remotes.json`) |
-| `PRAXIS_DAEMON_ADDR` / `PRAXIS_HOOK_TIMEOUT` | `:18095` / *(manifest)* | Explicit daemon bind address and hook timeout (`8s`, disable with `0`/`off`) |
+| `PRAXIS_DAEMON_ADDR` / `PRAXIS_HOOK_TIMEOUT` | `:18095` / *(manifest)* | Explicit daemon bind address and hook timeout (`12s` · `20s` Stop, disable with `0`/`off`) |
 | `PRAXIS_INCLUDE_PERSONAL` / `PRAXIS_ACCOUNT` | `0` / *(OS user)* | Overlay `personal` memories in projects; set account key (`AGY_ACCOUNT` alias) |
 | `PRAXIS_GIT_SYNC` / `PRAXIS_GUARDRAIL_FAIL_CLOSED` | `0` / `0` | Enable incremental Git commit rule sync / fail closed (`1`) when engine is unavailable |
 

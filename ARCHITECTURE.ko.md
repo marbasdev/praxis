@@ -82,7 +82,7 @@ flowchart LR
 | `LOCAL_MODEL_URL` / `LOCAL_MODEL_NAME` | `http://127.0.0.1:11434/v1` / *(자동)* | OpenAI 호환 로컬·게이트웨이 엔드포인트 (`Ollama`, `vLLM`, `LiteLLM`, `OpenRouter` 등 · `LOCAL_API_KEY` 선택) |
 | `JEV_API_URL` / `JEV_MODEL` | `http://127.0.0.1:8000` / `jev-latest` | System 1 판정 엔진 주소 및 모델 (`TYPESAFE_API_KEY` 선택) |
 | `PRAXIS_REMOTE_URL` / `PRAXIS_REMOTE_TOKEN` | *(비어 있음)* | `remotes.json`보다 우선 적용되는 원격 팀 서버 URL 및 Bearer 토큰 |
-| `PRAXIS_DAEMON_ADDR` / `PRAXIS_HOOK_TIMEOUT` | `:18095` / *(매니페스트 기준)* | 데몬 바인딩 주소 수동 지정 및 훅 타임아웃(`8s`, 비활성화 `0`/`off`) |
+| `PRAXIS_DAEMON_ADDR` / `PRAXIS_HOOK_TIMEOUT` | `:18095` / *(매니페스트 기준)* | 데몬 바인딩 주소 수동 지정 및 훅 타임아웃(`12s` · Stop `20s`, 비활성화 `0`/`off`) |
 | `PRAXIS_INCLUDE_PERSONAL` / `PRAXIS_ACCOUNT` | `0` / *(OS 사용자)* | 프로젝트 조회 시 `personal` 포함 여부 및 계정 키 지정 (`AGY_ACCOUNT` 호환) |
 | `PRAXIS_GIT_SYNC` / `PRAXIS_GUARDRAIL_FAIL_CLOSED` | `0` / `0` | Git 커밋 증분 규칙 동기화 활성화 / 엔진 미설정·오류 시 엄격 차단(`1`) |
 

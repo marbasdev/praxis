@@ -167,7 +167,7 @@ func runWithFallback[T any](
 		var cancelPrimary context.CancelFunc
 		if fallbackOK && isFastHookTask && ctx != nil {
 			if dl, hasDL := ctx.Deadline(); hasDL {
-				if rem := time.Until(dl); rem >= 2*time.Second && rem <= 25*time.Second {
+				if rem := time.Until(dl); rem >= 5*time.Second && rem <= 25*time.Second {
 					reserve := min(3*time.Second, rem*2/5)
 					primaryCtx, cancelPrimary = context.WithTimeout(ctx, rem-reserve)
 				}

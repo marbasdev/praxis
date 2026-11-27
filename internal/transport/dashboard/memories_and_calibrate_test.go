@@ -772,7 +772,7 @@ func TestIndividualConfidenceAndRecalibration(t *testing.T) {
 		switch {
 		case strings.Contains(prompt, "Assign an individual semantic confidence"):
 			content = `{"items":[{"id":1,"confidence":0.97},{"id":2,"confidence":0.92},{"id":3,"confidence":0.82}]}`
-		case strings.Contains(prompt, "Evaluate each fact individually against the Current Task"):
+		case strings.Contains(prompt, "Current Task:"):
 			content = `{"items":[{"id":2,"score":4.4,"confidence":0.93},{"id":3,"score":4.1,"confidence":0.68}]}`
 		default:
 			content = `{"category":"architecture","sub_category":"core","tags":["test"],"tier":"rule","cardinality":"additive","is_permanent":0.90,"is_global_invariant":0.40,"confidence":0.91,"action":"INSERT","conflict_fact_ids":[]}`

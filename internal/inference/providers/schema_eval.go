@@ -97,7 +97,7 @@ func (e *schemaEvaluator) ScoreRelevance(ctx context.Context, currentTask string
 		return nil, nil
 	}
 	var sb strings.Builder
-	sb.WriteString(`Evaluate each fact individually against the Current Task and return ONLY facts with score >= 0.5 in "items" (omit completely unrelated facts with score < 0.5; return an empty "items" array if none apply):
+	sb.WriteString(`Evaluate each fact against the Current Task and return ONLY facts with score >= 0.5 in "items" (omit completely unrelated facts with score < 0.5; return an empty "items" array if none apply):
 - score (0.5 to 5.0): 4.5-5.0 critical constraint directly governing the task; 3.5-4.4 directly applicable rule/context; 2.0-3.4 indirect background; 0.5-1.9 tangential context (omit < 0.5).
 - confidence (0.00 to 1.00, 5-band certainty scale per returned item):
   * 0.95-1.00: unambiguous, explicit core architecture/safety rule or exact task match.

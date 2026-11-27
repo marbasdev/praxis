@@ -200,7 +200,7 @@ func TestRouterCircuitBreakerCooldownAndFallback(t *testing.T) {
 
 		hungRes := NewTaskResolverWithEndpoint(nil)
 		evHung, _ := hungRes(cfg, domain.TaskRelevance)
-		deadlineCtx, cancel := context.WithTimeout(context.Background(), 2100*time.Millisecond)
+		deadlineCtx, cancel := context.WithTimeout(context.Background(), 5100*time.Millisecond)
 		defer cancel()
 
 		got, err := evHung.ScoreRelevance(deadlineCtx, "database setup", facts)
